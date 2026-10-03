@@ -380,7 +380,24 @@ def validate(raw: dict, now: datetime) -> Draft:
     )
 
 
-# --- Photo lifecycle: on disk only while being read ---------------------------------------------
+# --- Inputs live outside Temporal: texts in memory, photos on disk while being read --------------
+
+_texts: dict[str, str] = {}
+
+
+def remember_text(text: str) -> str:
+    """Keep a message in memory only; workflows carry the returned key, never the text."""
+    key = secrets.token_hex(16)
+    _texts[key] = text
+    return key
+
+
+def recall_text(key: str) -> str | None:
+    return _texts.get(key)
+
+
+def forget_text(key: str) -> None:
+    _texts.pop(key, None)
 
 
 def save_photo(tmp_dir: Path, data: bytes, suffix: str) -> str:

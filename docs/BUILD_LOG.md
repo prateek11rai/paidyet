@@ -87,3 +87,28 @@ What we learned:
 - At temperature 0, two consecutive runs gave identical fields.
 
 **Privacy.** A photo is written to `.data/tmp/<32 random hex>.<ext>` with mode 0600, resolved only through an allowlist pattern, and deleted afterwards; `sweep()` runs on start. For Fix, Gemma gets the previous *fields* plus the user's correction, never the photo again, so a photo is needed only for the first read.
+
+## Sun 4 Oct, ~01:35: workflow and buttons
+
+**One `ReminderWorkflow` per reminder**, started as soon as a message arrives:
+1. **Read.** The `read_input` activity runs with up to 3 attempts. A cold model load (~25 s) fits inside its 3-minute timeout, and flaky Ollama calls or bad JSON are retried.
+2. **Discard the input.** Runs on success *and* on final failure, before anything else, so the photo is gone as early as possible.
+3. **Confirm.** Waits for `save`/`fix` signals and expires after 7 days.
+4. **Remind.** Durable timers. Signals: `paid` and `snooze(until)`. Query: `status`. The workflow is the source of truth; SQLite is a read model for `/due`.
+
+**Schedule** (pure functions, unit-tested):
+- A date due gets a reminder at 7 PM the day before. If that has passed, at 10 AM or 7 PM on the day.
+- Then a nudge every day at 10 AM until Paid.
+- A demo due ("in 2 minutes") fires at that time, then repeats at its own pace (from 1 minute up to 1 day). So the whole Save → remind → Snooze → remind → Paid cycle fits in a video with no fake clock.
+
+**Message text never enters Temporal history.** The brief rules out images and raw model text in workflow payloads. We extend that to what the user *typed*: texts and Fix corrections sit in an in-memory inbox, and the workflow carries only a random key. Fix sends Gemma the previous *fields* plus the correction, so the original text and photo are needed only once. The trade-off: if PaidYet restarts between receiving a message and reading it, the input is gone (texts were in memory, photos are swept). The read then fails as non-retryable `InputGone`, and the user is asked to send it again. We chose privacy over durability for that brief window.
+
+**Who may tap what.** Before signalling, the bot queries the workflow: Save and Fix belong to whoever added the reminder, Paid and Snooze to whoever owes it. Callback data is a type plus the reminder ID, at most 26 bytes (Telegram's limit is 64).
+
+**Test findings:**
+- Temporal's time-skipping test server downloads its binary on first use. With `download_dest_dir` set, it lands in `.pytest_cache/temporal/` (62 MB, 1.33.0); nothing goes to the system temp dir.
+- **Hang:** the suite passed test by test but hung when run together. One test left its workflow waiting on a 7-day timer. When a later test skipped time, that timer fired a workflow task onto a queue with no worker, and time skipping waited on it forever. The fix: each test terminates its own workflow before its worker stops.
+- The final-failure test caught the workflow notifying the user *before* deleting the input. Swapped: delete first.
+- A formatting test caught `str.capitalize()` lowercasing "Fri 9 Oct" into "fri 9 oct".
+
+106 unit tests in 2.3 s.

@@ -7,12 +7,17 @@ import signal
 import sys
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from telegram.error import InvalidToken
 from temporalio.client import Client
+from temporalio.worker import Worker
 
 from paidyet import bot, extract
-from paidyet.config import TEMPORAL_ADDRESS, ConfigError, Settings, load_settings
+from paidyet.activities import Activities
+from paidyet.config import TASK_QUEUE, TEMPORAL_ADDRESS, ConfigError, Settings, load_settings
+from paidyet.store import Store
+from paidyet.workflows import ReminderWorkflow
 
 log = logging.getLogger("paidyet")
 
@@ -60,24 +65,48 @@ async def run(settings: Settings) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
+    store = Store(settings.db_path)
     async with contextlib.AsyncExitStack() as stack:
+        stack.callback(store.close)
+        http = await stack.enter_async_context(httpx.AsyncClient(base_url=settings.ollama_url, timeout=180))
+        warm_up = asyncio.create_task(warm_up_model(http, settings.ollama_model))
+
+        app = None
         if settings.telegram_bot_token:
-            app = bot.build(settings)
+            app = bot.build(settings, client)
             try:
                 await stack.enter_async_context(app)
             except InvalidToken as e:
                 raise SystemExit("TELEGRAM_BOT_TOKEN was rejected by Telegram; check it in .env") from e
+        else:
+            log.info("TELEGRAM_BOT_TOKEN is not set: skipping the Telegram bot (reminders wait until it is set)")
+
+        activities = Activities(settings, store, http, app.bot if app else None)
+        worker = Worker(client, task_queue=TASK_QUEUE, workflows=[ReminderWorkflow], activities=activities.all())
+        await stack.enter_async_context(worker)
+        log.info("Temporal: worker running on task queue %r", TASK_QUEUE)
+
+        if app is not None:
             await app.start()
             stack.push_async_callback(app.stop)
             await app.updater.start_polling()
             stack.push_async_callback(app.updater.stop)
             log.info("Telegram: polling as @%s", app.bot.username)
-        else:
-            log.info("TELEGRAM_BOT_TOKEN is not set: skipping the Telegram bot")
 
         log.info("PaidYet is up. Ctrl-C to stop.")
         await stop.wait()
         log.info("shutting down")
+        warm_up.cancel()
+
+
+async def warm_up_model(http: httpx.AsyncClient, model: str) -> None:
+    """Load Gemma now so the first message doesn't wait ~20 s for it."""
+    try:
+        r = await http.post("/api/generate", json={"model": model, "keep_alive": "5m"})
+        r.raise_for_status()
+        log.info("Ollama: %s loaded in %d ms", model, r.json().get("load_duration", 0) // 1_000_000)
+    except httpx.HTTPError as e:
+        log.warning("Ollama: could not preload %s (%s); the first read will be slower", model, type(e).__name__)
 
 
 def main() -> None:
