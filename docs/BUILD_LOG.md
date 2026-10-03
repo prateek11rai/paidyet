@@ -202,3 +202,21 @@ A second Claude instance reviewed the repo at `f61a137`. Prateek confirmed the s
 **The Ctrl-C dead end, properly understood this time.** During the proof, Ctrl-C left Ollama and Temporal running again. The earlier explanation (poe re-sends SIGINT every 0.8 s) was only half of it. poe's shutdown loop also *raises the urgency by itself* every 0.8 s, and at level 3 sends **SIGKILL** to the task's process group. Anything that takes more than ~1.6 s to shut down is killed, cleanup included. The Temporal worker with live workflows takes about that long; the earlier test passed only because the app exited instantly. Reproduced 3/3 in a scratch project with a fake app that needs 2 s to stop.
 
 The fix: `up` is now a `cmd` task with `use_exec = true`, so poe hands the process over to `bash -c "$UP_SCRIPT"` and isn't around to escalate. Verified 3/3 in the scratch project, then on the real stack: Ctrl-C with live workflows stopped everything in 3 s, with no pid files left.
+
+## Sun 4 Oct, ~03:10: a portable uv.lock
+
+`uv.lock` pointed every package at a private package mirror this laptop uses, which nobody else can install from. The fix:
+- **Rewrite** the mirror's registry and file URLs to `https://pypi.org/simple` and `https://files.pythonhosted.org/packages/`, which use the same path layout.
+- **Verify** against PyPI's JSON API (read-only): all 71 pinned files across 25 packages exist at the rewritten URLs with identical sha256.
+- **Fix every commit**, since the repo goes public: a backup bundle, then `git filter-repo --replace-text` over all 12 commits. Afterwards the mirror appears 0 times in `git log -p --all`; author, dates and messages are unchanged; and `uv.lock` is the only path that differs in any commit. Force-pushed with a lease pinned to the old head while the repo was still private.
+
+**Why it kept coming back.** Two things re-lock silently on a machine whose uv uses a mirror as its default index:
+1. Plain `uv run`: a PyPI-pointing lock looks stale to it, and an offline test confirmed a re-lock writes all 96 URLs back to the mirror.
+2. **poe itself:** it auto-detects uv projects and runs every task through `uv run`, without `--frozen`, so even `uv run --frozen poe test` re-locked.
+
+Now:
+- poe's executor is set to `uv` with `frozen = true`;
+- CLAUDE.md says to use `uv run --frozen …` on such a machine;
+- a unit test fails if `uv.lock` names any host other than PyPI's two.
+
+138 unit tests.

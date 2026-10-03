@@ -57,6 +57,9 @@ Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **
    uv sync
    ```
    uv uses a Python 3.12 that's already on your machine (we use pyenv) and never downloads one.
+
+   > [!NOTE]
+   > If your uv is configured with a private package mirror as its default index, `uv sync` and plain `uv run` re-lock `uv.lock` against it. Run commands as `uv run --frozen …` there, and don't commit the re-locked file; a unit test catches it if you do.
 4. Configure: `cp .env.example .env`, then fill in the values.
 
 | Variable | What it's for | Where to get it |

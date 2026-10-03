@@ -36,6 +36,11 @@ asyncio_default_test_loop_scope = "session"
 [tool.poe]
 envfile = ".env"
 
+[tool.poe.executor]
+# poe runs each task through `uv run`; never let that re-lock uv.lock (see CLAUDE.md).
+type = "uv"
+frozen = true
+
 [tool.poe.env]
 OLLAMA_MODEL.default = "gemma4:e4b"
 OLLAMA_HOST.default = "127.0.0.1:11434"

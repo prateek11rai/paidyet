@@ -22,6 +22,10 @@ A Telegram bot, run on a laptop, that reminds a friend to pay people back. Local
 - **Temporal sandbox.** `workflows.py` imports no I/O libraries and calls activities by name; side effects go in `activities.py`.
 - **Who may tap what.** Save/Fix: whoever added the reminder. Paid/Snooze: whoever owes it. The bot checks via the workflow's `status` query before signalling.
 - **Secrets.** Never read or print `.env`; only edit `.env.example`.
+- **uv.lock stays on public PyPI.** It must only mention `pypi.org` and `files.pythonhosted.org` (`test_lockfile_points_only_at_public_pypi` enforces it). On a machine whose uv uses a private package mirror as its default index, any re-lock rewrites every URL to that mirror, so:
+  - run commands as `uv run --frozen …` (e.g. `uv run --frozen poe up`); poe's own executor is already frozen in `pyproject.toml`;
+  - if `uv.lock` shows up modified anyway, `git checkout uv.lock`. Never commit a re-locked file;
+  - to change dependencies: lock as usual, rewrite the mirror's `…/simple/` and `…/packages/` URL prefixes to `https://pypi.org/simple` and `https://files.pythonhosted.org/packages/`, check every file's sha256 against PyPI's JSON API, and only then commit.
 - **Dependencies.** uv only, exact pins, `exclude-newer` cooldown in `pyproject.toml`; propose before adding anything. Tools come from Homebrew and poe tasks call Homebrew's binaries by path; Python comes from pyenv (`python-downloads = "never"`).
 - **Tests.** Unit tests use Temporal's time-skipping environment; its test-server binary downloads into `.pytest_cache/temporal/` (repo-local, gitignored). Each test must terminate its workflow before its worker stops, or a stray timer hangs time skipping for later tests. Integration tests fail loudly, never skip, when the stack is down.
 - **`poe up` is a `cmd` task with `use_exec`.** Under poe's supervision, a Ctrl-C escalates to SIGKILL after ~1.6 s, killing the app mid-shutdown and the stop-deps cleanup. Keep it exec'd.
