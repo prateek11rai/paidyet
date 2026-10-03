@@ -61,9 +61,10 @@ def scrub(event, _hint=None):
     return event
 
 
-def sentry_options(dsn: str) -> dict:
+def sentry_options(dsn: str, environment: str = "local") -> dict:
     return dict(
         dsn=dsn,
+        environment=environment,
         traces_sample_rate=1.0,
         send_default_pii=False,
         include_local_variables=False,

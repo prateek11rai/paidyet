@@ -336,6 +336,7 @@ _WEEKDAYS = {
 }  # fmt: skip
 _WEEKDAYS = {k.lower(): v for k, v in _WEEKDAYS.items()}
 _UNITS = {
+    "second": "seconds", "seconds": "seconds", "sec": "seconds", "secs": "seconds",
     "minute": "minutes", "minutes": "minutes", "min": "minutes", "mins": "minutes",
     "hour": "hours", "hours": "hours", "hr": "hours", "hrs": "hours", "ghanta": "hours", "ghante": "hours",
     "day": "days", "days": "days", "din": "days",
@@ -350,7 +351,7 @@ def parse_relative(phrase: str, now: datetime) -> tuple[datetime, bool] | None:
     today = now.date()
     if m := _IN_N.search(p):
         n, unit = int(m.group(1)), _UNITS[m.group(2)]
-        if unit in ("minutes", "hours"):
+        if unit in ("seconds", "minutes", "hours"):
             return now + timedelta(**{unit: n}), True
         return _day(today + timedelta(**{unit: n}), now), False
     if re.search(r"\b(day after tomorrow|parso|parson)\b", p):

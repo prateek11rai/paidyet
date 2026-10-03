@@ -60,6 +60,8 @@ def test_parse_relative_demo_minutes_are_exact():
     assert timed and due == SUNDAY + timedelta(minutes=2)
     due, timed = parse_relative("2 ghante mein", SUNDAY)
     assert timed and due == SUNDAY + timedelta(hours=2)
+    due, timed = parse_relative("in 5 seconds", SUNDAY)
+    assert timed and due == SUNDAY + timedelta(seconds=5)
 
 
 @pytest.mark.parametrize("phrase", ["whenever", "soon bhai", ""])
