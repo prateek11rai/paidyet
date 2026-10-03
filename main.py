@@ -3,21 +3,33 @@
 import asyncio
 import contextlib
 import logging
+import re
 import signal
 import sys
 from pathlib import Path
 
 import httpx
+import sentry_sdk
 from dotenv import load_dotenv
+from sentry_sdk.integrations.httpx import HttpxIntegration
 from telegram.error import InvalidToken
+from temporalio import activity
+from temporalio import client as client_interceptors
 from temporalio.client import Client
-from temporalio.worker import Worker
+from temporalio.converter import DataConverter
+from temporalio.worker import (
+    ActivityInboundInterceptor,
+    ExecuteActivityInput,
+    Interceptor,
+    Worker,
+    WorkflowInterceptorClassInput,
+)
 
 from paidyet import bot, extract
 from paidyet.activities import Activities
 from paidyet.config import TASK_QUEUE, TEMPORAL_ADDRESS, ConfigError, Settings, load_settings
 from paidyet.store import Store
-from paidyet.workflows import ReminderWorkflow
+from paidyet.workflows import TRACE_HEADERS, ReminderWorkflow, TraceHeaders
 
 log = logging.getLogger("paidyet")
 
@@ -34,28 +46,88 @@ def setup_logging(logs_dir: Path) -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def init_sentry(settings: Settings) -> None:
-    if not settings.sentry_dsn:
-        log.info("SENTRY_DSN is not set: running without Sentry")
-        return
-    import sentry_sdk
-    from sentry_sdk.integrations.httpx import HttpxIntegration
+# No leading \b: in ".../bot123456:ABC..." there is no word boundary between "bot" and the digits.
+TOKEN_LIKE = re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}")
 
-    sentry_sdk.init(
-        dsn=settings.sentry_dsn,
+
+def scrub(event, _hint=None):
+    """Defence in depth: nothing shaped like a Telegram bot token leaves the laptop."""
+    if isinstance(event, str):
+        return TOKEN_LIKE.sub("[token]", event)
+    if isinstance(event, dict):
+        return {k: scrub(v) for k, v in event.items()}
+    if isinstance(event, list):
+        return [scrub(v) for v in event]
+    return event
+
+
+def sentry_options(dsn: str) -> dict:
+    return dict(
+        dsn=dsn,
         traces_sample_rate=1.0,
         send_default_pii=False,
         include_local_variables=False,
         max_request_body_size="never",
         # Its spans carry request URLs, and Telegram's contain the bot token.
         disabled_integrations=[HttpxIntegration()],
+        before_send=scrub,
+        before_send_transaction=scrub,
     )
+
+
+def init_sentry(settings: Settings) -> None:
+    if not settings.sentry_dsn:
+        log.info("SENTRY_DSN is not set: running without Sentry")
+        return
+    sentry_sdk.init(**sentry_options(settings.sentry_dsn))
     log.info("Sentry: enabled (no PII, no prompts, no local variables)")
+
+
+# --- Temporal interceptors: one Sentry trace from the Telegram update through every activity ------
+
+PAYLOADS = DataConverter.default.payload_converter
+
+
+class SentryClientInterceptor(client_interceptors.Interceptor):
+    def intercept_client(self, next: client_interceptors.OutboundInterceptor) -> client_interceptors.OutboundInterceptor:
+        return _SentryClientOutbound(next)
+
+
+class _SentryClientOutbound(client_interceptors.OutboundInterceptor):
+    async def start_workflow(self, input: client_interceptors.StartWorkflowInput):
+        trace = {"sentry-trace": sentry_sdk.get_traceparent(), "baggage": sentry_sdk.get_baggage()}
+        input.headers = {**input.headers, **{k: PAYLOADS.to_payload(v) for k, v in trace.items() if v}}
+        return await super().start_workflow(input)
+
+
+class SentryWorkerInterceptor(Interceptor):
+    def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
+        return _SentryActivity(next)
+
+    def workflow_interceptor_class(self, input: WorkflowInterceptorClassInput):
+        return TraceHeaders
+
+
+class _SentryActivity(ActivityInboundInterceptor):
+    async def execute_activity(self, input: ExecuteActivityInput):
+        info = activity.info()
+        trace = {k: PAYLOADS.from_payload(v, str) for k, v in input.headers.items() if k in TRACE_HEADERS}
+        txn = sentry_sdk.continue_trace(trace, op="temporal.activity", name=f"activity {info.activity_type}")
+        with sentry_sdk.start_transaction(txn) as t:
+            t.set_tag("temporal.activity", info.activity_type)
+            t.set_tag("temporal.workflow_id", info.workflow_id)
+            t.set_data("temporal.attempt", info.attempt)
+            try:
+                return await super().execute_activity(input)
+            except Exception as e:
+                t.set_status("internal_error")
+                sentry_sdk.capture_exception(e)  # every failed attempt, so flaky retries show up
+                raise
 
 
 async def run(settings: Settings) -> None:
     try:
-        client = await Client.connect(TEMPORAL_ADDRESS)
+        client = await Client.connect(TEMPORAL_ADDRESS, interceptors=[SentryClientInterceptor()])
     except RuntimeError as e:
         raise SystemExit(f"Temporal isn't reachable at {TEMPORAL_ADDRESS}. Start everything with `uv run poe up`.") from e
     log.info("Temporal: connected to %s (namespace %s)", TEMPORAL_ADDRESS, client.namespace)
@@ -82,7 +154,13 @@ async def run(settings: Settings) -> None:
             log.info("TELEGRAM_BOT_TOKEN is not set: skipping the Telegram bot (reminders wait until it is set)")
 
         activities = Activities(settings, store, http, app.bot if app else None)
-        worker = Worker(client, task_queue=TASK_QUEUE, workflows=[ReminderWorkflow], activities=activities.all())
+        worker = Worker(
+            client,
+            task_queue=TASK_QUEUE,
+            workflows=[ReminderWorkflow],
+            activities=activities.all(),
+            interceptors=[SentryWorkerInterceptor()],
+        )
         await stack.enter_async_context(worker)
         log.info("Temporal: worker running on task queue %r", TASK_QUEUE)
 

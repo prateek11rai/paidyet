@@ -117,12 +117,16 @@ def test_users_relative_phrase_beats_a_date():
     assert d.has_time and d.due_at == (SUNDAY + timedelta(minutes=2)).isoformat()
 
 
-@pytest.mark.parametrize("evidence", ["Grace period ends 19-11-2026", "Bill date 24-09-2026",
-                                      "Next invoice 02 Nov 2026", "Amount payable after due date 1,290"])  # fmt: skip
-def test_non_deadline_labels_block_save(evidence):
+@pytest.mark.parametrize(
+    "evidence, kind",
+    [("Grace period ends 19-11-2026", "the end of a grace period"), ("Bill date 24-09-2026", "the bill date"),
+     ("Next invoice 02 Nov 2026", "the next bill's date"), ("Amount payable after due date 1,290", "the late-fee date")],
+)  # fmt: skip
+def test_non_deadline_labels_block_save_without_quoting_the_bill(evidence, kind):
     d = validate(raw(kind="bill", due_evidence=evidence, due_date="2026-11-19"), SUNDAY)
-    assert not d.ready and "isn't a due date" in d.problems[0]
+    assert d.problems == [f"The date I found looks like {kind}, not the due date."]
     assert d.due_at is None
+    assert not any(ch.isdigit() for ch in d.problems[0])  # no dates or amounts copied from the bill
 
 
 def test_bill_without_due_date_blocks_save():
@@ -265,3 +269,37 @@ def test_sweep_deletes_leftovers(tmp_path):
     assert extract.sweep(tmp_path) == 3
     assert list(tmp_path.iterdir()) == []
     assert extract.sweep(tmp_path / "missing") == 0
+
+
+async def test_sentry_gets_timings_and_tokens_but_no_bill_contents(sentry):
+    import sentry_sdk
+
+    secret = raw(payee="Zorawar", amount_inr=7319.55, title="Zorawar dinner", due_evidence="Grace period ends 19-11-2026",
+                 due_date="2026-11-19", kind="bill")  # fmt: skip
+    better = secret | {"due_evidence": "Pay by 12 Oct 2026", "due_date": "2026-10-12"}
+    http, _ = fake_ollama([secret, better])
+    with sentry_sdk.start_transaction(name="activity read_input") as txn:
+        async with http:
+            draft, _ = await extract.read(http, "gemma4:e4b", SUNDAY, text="Zorawar ko 7319 dene hai", image=b"PNG-UNIQUE-MARKER")
+    assert draft.ready
+
+    sent = sentry.everything()
+    for leak in ("Zorawar", "7319", "Grace period", "19-11-2026", "12 Oct", "dene hai", "UNIQUE-MARKER", "UE5HLVVOSVFV"):
+        assert leak not in sent, leak
+    spans = sentry.spans()
+    ops = [s["op"] for s in spans]
+    assert ops.count("gen_ai.chat") == 2 and "gen_ai.invoke_agent" in ops and ops.count("gen_ai.execute_tool") == 2
+    chat = next(s for s in spans if s["op"] == "gen_ai.chat")
+    assert chat["data"]["gen_ai.request.model"] == "gemma4:e4b"
+    assert chat["data"]["gen_ai.usage.input_tokens"] == 600 and chat["data"]["gen_ai.usage.output_tokens"] == 80
+    agent = next(s for s in spans if s["op"] == "gen_ai.invoke_agent")
+    assert agent["data"]["paidyet.retry_reason"] == "wrong_date_label" and agent["data"]["paidyet.model_calls"] == 2
+    assert {s["trace_id"] for s in spans if s["op"].startswith("gen_ai")} == {txn.trace_id}
+
+
+def test_scrub_removes_anything_shaped_like_a_bot_token():
+    from main import scrub
+
+    token = "1234567890:" + "A" * 35
+    event = {"message": f"POST https://api.telegram.org/bot{token}/sendMessage", "extra": [{"u": token}]}
+    assert token not in json.dumps(scrub(event))

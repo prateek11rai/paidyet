@@ -10,6 +10,12 @@ from datetime import datetime, time, timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
+from temporalio.worker import (
+    ExecuteWorkflowInput,
+    StartActivityInput,
+    WorkflowInboundInterceptor,
+    WorkflowOutboundInterceptor,
+)
 
 with workflow.unsafe.imports_passed_through():
     from paidyet.extract import Draft
@@ -355,3 +361,30 @@ class ReminderWorkflow:
     async def _notice(self, text: str, edit: int | None = None, reply: int | None = None) -> None:
         notice = Notice(chat_id=self._inp.origin_chat_id, text=text, reply_to=reply, edit_message_id=edit)
         await workflow.execute_activity("notify", notice, **QUICK)
+
+
+# --- Tracing: carry the Sentry trace from workflow start to every activity ----------------------
+
+TRACE_HEADERS = ("sentry-trace", "baggage")
+
+
+class TraceHeaders(WorkflowInboundInterceptor):
+    """Copies the trace headers the bot set on workflow start onto each activity. Opaque copies, no I/O."""
+
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        self.trace: dict = {}
+        super().init(_TraceOutbound(outbound, self))
+
+    async def execute_workflow(self, input: ExecuteWorkflowInput):
+        self.trace = {k: v for k, v in input.headers.items() if k in TRACE_HEADERS}
+        return await super().execute_workflow(input)
+
+
+class _TraceOutbound(WorkflowOutboundInterceptor):
+    def __init__(self, next: WorkflowOutboundInterceptor, inbound: TraceHeaders) -> None:
+        super().__init__(next)
+        self._inbound = inbound
+
+    def start_activity(self, input: StartActivityInput):
+        input.headers = {**input.headers, **self._inbound.trace}
+        return super().start_activity(input)

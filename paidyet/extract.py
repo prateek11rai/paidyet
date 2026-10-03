@@ -14,6 +14,9 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import httpx
+import sentry_sdk
+from sentry_sdk.ai.monitoring import record_token_usage
+from sentry_sdk.consts import OP, SPANDATA
 
 KINDS = ("bill", "iou", "other")
 MAX_AMOUNT_INR = 1_000_000
@@ -69,6 +72,8 @@ class Usage:
     output_tokens: int
     total_ms: int
     load_ms: int
+    prompt_ms: int = 0
+    eval_ms: int = 0
 
 
 @dataclass
@@ -145,22 +150,39 @@ async def ask_gemma(
         "think": think,
         "options": {"temperature": 0},
     }
-    r = await http.post("/api/chat", json=body)
-    r.raise_for_status()
-    data = r.json()
-    try:
-        raw = json.loads(data["message"]["content"])
-    except (KeyError, json.JSONDecodeError) as e:
-        raise ExtractionError("Gemma's reply was not valid JSON") from e
-    if not isinstance(raw, dict):
-        raise ExtractionError("Gemma's reply was not a JSON object")
-    usage = Usage(
-        model=model,
-        input_tokens=data.get("prompt_eval_count", 0),
-        output_tokens=data.get("eval_count", 0),
-        total_ms=data.get("total_duration", 0) // 1_000_000,
-        load_ms=data.get("load_duration", 0) // 1_000_000,
-    )
+    # The span records the model, tokens and Ollama's timings. Never the prompt, the image or the reply.
+    with sentry_sdk.start_span(op=OP.GEN_AI_CHAT, name=f"chat {model}") as span:
+        span.set_data(SPANDATA.GEN_AI_OPERATION_NAME, "chat")
+        span.set_data(SPANDATA.GEN_AI_SYSTEM, "ollama")
+        span.set_data(SPANDATA.GEN_AI_REQUEST_MODEL, model)
+        span.set_data(SPANDATA.GEN_AI_REQUEST_TEMPERATURE, 0)
+        span.set_data("paidyet.input", "fix" if previous else "photo" if image else "text")
+        span.set_data("paidyet.hinted", hint is not None)
+        r = await http.post("/api/chat", json=body)
+        r.raise_for_status()
+        data = r.json()
+        usage = Usage(
+            model=model,
+            input_tokens=data.get("prompt_eval_count", 0),
+            output_tokens=data.get("eval_count", 0),
+            total_ms=data.get("total_duration", 0) // 1_000_000,
+            load_ms=data.get("load_duration", 0) // 1_000_000,
+            prompt_ms=data.get("prompt_eval_duration", 0) // 1_000_000,
+            eval_ms=data.get("eval_duration", 0) // 1_000_000,
+        )
+        span.set_data(SPANDATA.GEN_AI_RESPONSE_MODEL, data.get("model", model))
+        record_token_usage(span, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+        span.set_data("ollama.load_ms", usage.load_ms)
+        span.set_data("ollama.prompt_eval_ms", usage.prompt_ms)
+        span.set_data("ollama.eval_ms", usage.eval_ms)
+        try:
+            raw = json.loads(data["message"]["content"])
+        except (KeyError, json.JSONDecodeError) as e:
+            span.set_status("internal_error")
+            raise ExtractionError("Gemma's reply was not valid JSON") from e
+        if not isinstance(raw, dict):
+            span.set_status("internal_error")
+            raise ExtractionError("Gemma's reply was not a JSON object")
     return raw, usage
 
 
@@ -175,14 +197,53 @@ async def read(
     correction: str | None = None,
 ) -> tuple[Draft, list[Usage]]:
     """Ask Gemma; if code spots a known mistake, ask once more with a pointed hint; then validate."""
-    raw, usage = await ask_gemma(http, model, now, text=text, image=image, previous=previous, correction=correction)
-    usages = [usage]
-    if hint := review(raw, now):
-        raw, usage = await ask_gemma(
-            http, model, now, text=text, image=image, previous=previous, correction=correction, hint=hint
+    with sentry_sdk.start_span(op=OP.GEN_AI_INVOKE_AGENT, name="invoke_agent paidyet-reader") as agent:
+        agent.set_data(SPANDATA.GEN_AI_OPERATION_NAME, "invoke_agent")
+        agent.set_data(SPANDATA.GEN_AI_AGENT_NAME, "paidyet-reader")
+        agent.set_data(SPANDATA.GEN_AI_SYSTEM, "ollama")
+        agent.set_data(SPANDATA.GEN_AI_REQUEST_MODEL, model)
+        agent.set_data("paidyet.input", "fix" if previous else "photo" if image else "text")
+
+        raw, usage = await ask_gemma(http, model, now, text=text, image=image, previous=previous, correction=correction)
+        usages = [usage]
+        with _tool_span("review_answer", "Code checks Gemma's answer for mistakes it knows about") as tool:
+            hint = review(raw, now)
+            tool.set_data("paidyet.retry_reason", _hint_kind(hint))
+        if hint:
+            raw, usage = await ask_gemma(
+                http, model, now, text=text, image=image, previous=previous, correction=correction, hint=hint
+            )
+            usages.append(usage)
+        with _tool_span("validate_draft", "Code decides the dates, the amount and whether Save is allowed") as tool:
+            draft = validate(raw, now)
+            tool.set_data("paidyet.ready", draft.ready)
+            tool.set_data("paidyet.problems", len(draft.problems))
+
+        agent.set_data("paidyet.model_calls", len(usages))
+        agent.set_data("paidyet.retry_reason", _hint_kind(hint))
+        agent.set_data("paidyet.ready", draft.ready)
+        record_token_usage(
+            agent,
+            input_tokens=sum(u.input_tokens for u in usages),
+            output_tokens=sum(u.output_tokens for u in usages),
         )
-        usages.append(usage)
-    return validate(raw, now), usages
+    return draft, usages
+
+
+def _tool_span(name: str, description: str):
+    span = sentry_sdk.start_span(op=OP.GEN_AI_EXECUTE_TOOL, name=f"execute_tool {name}")
+    span.set_data(SPANDATA.GEN_AI_OPERATION_NAME, "execute_tool")
+    span.set_data(SPANDATA.GEN_AI_TOOL_NAME, name)
+    span.set_data(SPANDATA.GEN_AI_TOOL_DESCRIPTION, description)
+    span.set_data("gen_ai.tool.type", "function")
+    return span
+
+
+def _hint_kind(hint: str | None) -> str:
+    """A category for traces; the hint text itself can quote the bill."""
+    if hint is None:
+        return "none"
+    return "wrong_date_label" if "not a payment deadline" in hint else "no_due_date"
 
 
 # --- Deterministic validation
@@ -231,10 +292,25 @@ def wrong_deadline_label(raw: dict) -> str | None:
     return None
 
 
+_LABEL_KINDS = (
+    ("grace", "the end of a grace period"),
+    ("next", "the next bill's date"),
+    ("reading", "a meter-reading date"),
+    ("period", "a billing period"),
+    ("after", "the late-fee date"),
+)
+
+
+def _label_kind(label: str) -> str:
+    """Name the kind of date without quoting the bill: problems end up in Temporal history."""
+    lowered = label.lower()
+    return next((kind for word, kind in _LABEL_KINDS if word in lowered), "the bill date")
+
+
 def choose_date(raw: dict, now: datetime) -> tuple[str | None, str | None]:
     """(calendar due date, problem). Code parses the quoted evidence; the model's own date is only a fallback."""
     if label := wrong_deadline_label(raw):
-        return None, f"The date I found is labelled “{label[:40]}”, which isn't a due date."
+        return None, f"The date I found looks like {_label_kind(label)}, not the due date."
     evidence = raw.get("due_evidence")
     if isinstance(evidence, str) and (parsed := printed_date(evidence, now)):
         return parsed, None

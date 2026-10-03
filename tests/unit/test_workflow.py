@@ -14,7 +14,6 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from paidyet.config import ROOT
 from paidyet.extract import Draft
 from paidyet.workflows import (
     ConfirmView,
@@ -31,14 +30,6 @@ from paidyet.workflows import (
 
 IST = ZoneInfo("Asia/Kolkata")
 ARJUN, ADMIN = 222, 111
-
-
-@pytest.fixture(scope="session")
-async def env():
-    cache = ROOT / ".pytest_cache" / "temporal"  # the test server binary stays inside the repo
-    cache.mkdir(parents=True, exist_ok=True)
-    async with await WorkflowEnvironment.start_time_skipping(download_dest_dir=str(cache)) as env:
-        yield env
 
 
 class Fakes:
@@ -320,3 +311,30 @@ async def test_friend_who_never_opened_the_bot(env):
         assert notice.chat_id == ADMIN and "/start" in notice.text
         status = await until(handle, lambda s: s.state == "scheduled")
         assert status.next_at  # still alive: the next reminder will try again
+
+
+async def test_one_sentry_trace_from_the_telegram_update_to_every_activity(env, sentry):
+    import sentry_sdk
+    from temporalio.client import Client
+
+    from main import SentryClientInterceptor, SentryWorkerInterceptor
+
+    client = Client(**{**env.client.config(), "interceptors": [SentryClientInterceptor()]})
+    now = await now_ist(env)
+    fakes = Fakes(reads=[draft(now + timedelta(days=3))])
+    queue = f"test-{uuid.uuid4()}"
+    worker = Worker(client, task_queue=queue, workflows=[ReminderWorkflow], activities=fakes.activities(),
+                    interceptors=[SentryWorkerInterceptor()])  # fmt: skip
+    inp = ReminderInput(owner_id=ARJUN, added_by=ARJUN, origin_chat_id=ARJUN, origin_message_id=1,
+                        status_message_id=2, sent_at=now.isoformat(), text_key="k" * 32)  # fmt: skip
+    async with worker:
+        with sentry_sdk.start_transaction(op="telegram.update", name="telegram capture") as parent:
+            handle = await client.start_workflow(ReminderWorkflow.run, inp, id=f"r-{uuid.uuid4().hex[:12]}", task_queue=queue)
+        try:
+            await until(handle, lambda s: s.state == "confirming")
+            await eventually(lambda: "show_confirm" in fakes.names())
+        finally:
+            await handle.terminate("test finished")
+    traces = {t["transaction"]: t["contexts"]["trace"]["trace_id"] for t in sentry.transactions()}
+    assert {"activity read_input", "activity discard_input", "activity show_confirm"} <= traces.keys()
+    assert set(traces.values()) == {parent.trace_id}

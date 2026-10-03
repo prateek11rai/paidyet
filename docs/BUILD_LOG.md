@@ -119,3 +119,27 @@ What we learned:
 - **`/due`** shows "Overdue" and "Upcoming" from SQLite. Each line says "added by you" or "added by <admin>" and has a ✅ Paid button. Tapping it signals the workflow and redraws the list without that item. The admin also sees "You added for others".
 - **Admin.** `/remind arjun ₹500 to Rahul by Fri`, or a bill photo captioned "for arjun". The admin confirms the draft in their own chat ("For Arjun · added by you"). On Save, Arjun gets "Prateek added a reminder for you" with Paid/Snooze, and when he taps Paid the admin gets "✅ Arjun paid: …".
 - **A friend who never opened the bot.** Telegram won't let a bot message someone first. The "added" message fails as non-retryable, so the workflow tells the admin to ask the friend to send /start, stays alive, and tries again at each reminder.
+
+## Sun 4 Oct, ~02:15: Sentry agent tracing (code; live check pending the DSN)
+
+**What a read looks like in Sentry:**
+```
+telegram capture                       (transaction, bot)
+├─ download photo · start ReminderWorkflow
+└─ activity read_input                 (transaction, worker; same trace through Temporal headers)
+   └─ invoke_agent paidyet-reader      gen_ai.invoke_agent: model, total tokens, model_calls, retry_reason, ready
+      ├─ chat gemma4:e4b               gen_ai.chat: tokens in/out, ollama.load_ms / prompt_eval_ms / eval_ms
+      ├─ execute_tool review_answer    code checks the answer (retry_reason: none | no_due_date | wrong_date_label)
+      ├─ chat gemma4:e4b               only when review_answer asked for a hinted retry
+      └─ execute_tool validate_draft   code decides dates, amount, ready / problem count
+   activity discard_input · activity show_confirm · … · activity send_reminder (days later, same trace)
+```
+- **Trace across Temporal.** A client interceptor writes `sentry-trace`/`baggage` into the workflow-start headers. A workflow interceptor (pure, inside the sandbox) copies them onto every activity it schedules. A worker interceptor continues the trace and makes each activity a transaction, capturing *every* failed attempt, so flaky retries show up as issues.
+- **Code's own decisions are visible.** `review_answer` and `validate_draft` are tool spans, so the trace shows exactly where code overrode or rejected Gemma.
+
+**Privacy, enforced by a test.** A unit test runs a full read with Sentry pointed at an in-memory transport, using the *same* options as `main.py`. It asserts that the payee, amount, phrase, dates, label and image bytes appear nowhere in what Sentry would send. Spans carry the model name, token counts, timings, call counts and outcome categories only.
+
+**What the tests caught:**
+- **Token scrubber.** `before_send` scrubs anything shaped like a bot token. Its first regex started with `\b`, and in `…/bot123456:ABC…` there's no word boundary between "bot" and the digits, so a token inside a Telegram URL would have slipped through. Fixed with a digit lookbehind.
+- **Bill text in Temporal history.** A blocked draft said "The date I found is labelled 'Grace period ends 19-11-2026'…". That message lives in the Draft, which is stored in Temporal history: model-quoted bill text. It now names a category instead ("looks like the end of a grace period, not the due date"). The hint to Gemma can still quote, because it goes only to the local model.
+- **Span format.** sentry-sdk 2.70 sends gen_ai spans as streamed span-v2 items linked by trace and parent span IDs, not inside the transaction's `spans` list. The tests read both formats.

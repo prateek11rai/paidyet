@@ -1,11 +1,13 @@
 """Telegram side: allowlist gate, capture, buttons, snooze calendar, and how messages read."""
 
 import calendar
+import functools
 import logging
 import re
 import secrets
 from datetime import date, datetime, timedelta
 
+import sentry_sdk
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -208,6 +210,20 @@ def calendar_keyboard(rid: str, year: int, month: int, today: date) -> InlineKey
 # --- Handlers ----------------------------------------------------------------------------------
 
 
+def traced(name: str):
+    """Each Telegram update is a Sentry transaction; the workflow it starts continues the same trace."""
+
+    def wrap(handler):
+        @functools.wraps(handler)
+        async def inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            with sentry_sdk.start_transaction(op="telegram.update", name=name):
+                await handler(update, context)
+
+        return inner
+
+    return wrap
+
+
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return context.bot_data["settings"]
 
@@ -274,12 +290,14 @@ def due_message(viewer: int, settings: Settings, store: Store, now: datetime, sk
     return "\n\n".join(parts), InlineKeyboardMarkup(buttons) if buttons else None
 
 
+@traced("telegram /due")
 async def due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = _settings(context)
     text, markup = due_message(update.effective_user.id, settings, context.bot_data["store"], datetime.now(settings.tz))
     await update.effective_message.reply_text(text, reply_markup=markup)
 
 
+@traced("telegram /remind")
 async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/remind <name> <what>: the admin adds a reminder for a friend."""
     msg, user, settings = update.effective_message, update.effective_user, _settings(context)
@@ -321,10 +339,12 @@ async def _download_photo(msg: Message, settings: Settings) -> str | None:
         return None
     if (media.file_size or 0) > MAX_PHOTO_BYTES:
         raise ValueError("too big")
-    data = await (await media.get_file()).download_as_bytearray()
-    return extract.save_photo(settings.tmp_dir, bytes(data), suffix)
+    with sentry_sdk.start_span(op="telegram.download", name="download photo"):
+        data = await (await media.get_file()).download_as_bytearray()
+        return extract.save_photo(settings.tmp_dir, bytes(data), suffix)
 
 
+@traced("telegram capture")
 async def capture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg, user, settings = update.effective_message, update.effective_user, _settings(context)
 
@@ -392,7 +412,8 @@ async def _start_reminder(
         text_key=text_key,
     )
     try:
-        await _temporal(context).start_workflow(ReminderWorkflow.run, inp, id=new_reminder_id(), task_queue=TASK_QUEUE)
+        with sentry_sdk.start_span(op="temporal.start_workflow", name="start ReminderWorkflow"):
+            await _temporal(context).start_workflow(ReminderWorkflow.run, inp, id=new_reminder_id(), task_queue=TASK_QUEUE)
     except RPCError:
         log.exception("could not start a reminder workflow")
         if photo_name:
@@ -402,6 +423,7 @@ async def _start_reminder(
         await status.edit_text("I can't reach my scheduler right now. Try again in a minute.")
 
 
+@traced("telegram button")
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q, user, settings = update.callback_query, update.effective_user, _settings(context)
     action, _, rest = (q.data or "").partition(":")
