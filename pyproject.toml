@@ -1,0 +1,161 @@
+[project]
+name = "paidyet"
+version = "0.1.0"
+description = "A Telegram bot that reads bills with local Gemma and keeps reminding you until you pay."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx==0.28.1",
+    "python-dotenv==1.2.3",
+    "python-telegram-bot==22.8",
+    "sentry-sdk==2.70.0",
+    "temporalio==1.33.0",
+]
+
+[dependency-groups]
+dev = [
+    "poethepoet==0.48.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[tool.uv]
+# Release-age cooldown: nothing published in the 7 days before the project started.
+exclude-newer = "2026-09-27T00:00:00Z"
+# Use the interpreter already on the machine (pyenv); never download one.
+python-downloads = "never"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests/unit"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
+[tool.poe]
+envfile = ".env"
+
+[tool.poe.env]
+OLLAMA_MODEL.default = "gemma4:e4b"
+OLLAMA_HOST.default = "127.0.0.1:11434"
+PAIDYET_DATA_DIR.default = ".data"
+TZ.default = "Asia/Kolkata"
+
+[tool.poe.tasks.up]
+help = "Start Ollama and Temporal, run the app in the foreground, stop the deps on exit or Ctrl-C"
+interpreter = "bash"
+verbosity = -1
+shell = '''
+set -euo pipefail
+cleanup() {
+  # After Ctrl-C, poe re-sends SIGINT to this process group until we exit. Ignore it,
+  # and give stop-deps its own process group (set -m) so it can finish.
+  trap '' INT TERM
+  set -m
+  poe stop-deps
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+poe start-deps
+python main.py
+'''
+
+[tool.poe.tasks.start-deps]
+help = "Start Ollama and the Temporal dev server in the background (pid files in $PAIDYET_DATA_DIR/run)"
+interpreter = "bash"
+verbosity = -1
+shell = '''
+set -euo pipefail
+brew_bin="$(brew --prefix)/bin"
+data="$PAIDYET_DATA_DIR"; run="$data/run"; logs="$data/logs"
+mkdir -p "$run" "$logs" "$data/tmp"
+
+case "${OLLAMA_HOST%:*}" in
+  127.0.0.1|localhost) ;;
+  *) echo "OLLAMA_HOST must be a loopback address (127.0.0.1), got $OLLAMA_HOST" >&2; exit 1 ;;
+esac
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+wait_for() {  # name seconds command...
+  local name=$1 secs=$2; shift 2
+  for _ in $(seq "$secs"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
+  echo "$name did not become healthy within ${secs}s; see $logs/$name.log" >&2
+  return 1
+}
+# set -m puts each daemon in its own process group, so Ctrl-C on `poe up` reaches
+# only the app; stop-deps then shuts the daemons down cleanly.
+spawn() {  # name command...
+  local name=$1; shift
+  set -m
+  nohup "$@" >>"$logs/$name.log" 2>&1 &
+  echo $! >"$run/$name.pid"
+  set +m
+}
+for f in "$run"/*.pid; do [ -e "$f" ] && ! alive "$f" && rm -f "$f"; done
+
+ollama_up() { curl -sf "http://$OLLAMA_HOST/api/version"; }
+if alive "$run/ollama.pid"; then
+  echo "ollama:   already running (pid $(cat "$run/ollama.pid"))"
+elif ollama_up >/dev/null 2>&1; then
+  echo "ollama:   reusing the instance already serving $OLLAMA_HOST (poe will not stop it)"
+else
+  OLLAMA_HOST="$OLLAMA_HOST" spawn ollama "$brew_bin/ollama" serve
+  wait_for ollama 30 ollama_up
+  echo "ollama:   started on $OLLAMA_HOST (pid $(cat "$run/ollama.pid"))"
+fi
+if ! OLLAMA_HOST="$OLLAMA_HOST" "$brew_bin/ollama" show "$OLLAMA_MODEL" >/dev/null 2>&1; then
+  echo "ollama:   $OLLAMA_MODEL not found locally, pulling it"
+  OLLAMA_HOST="$OLLAMA_HOST" "$brew_bin/ollama" pull "$OLLAMA_MODEL"
+fi
+echo "ollama:   model $OLLAMA_MODEL ready"
+
+temporal_up() { "$brew_bin/temporal" operator cluster health --address 127.0.0.1:7233; }
+if alive "$run/temporal.pid"; then
+  echo "temporal: already running (pid $(cat "$run/temporal.pid"))"
+elif temporal_up >/dev/null 2>&1; then
+  echo "temporal: another process is already serving 127.0.0.1:7233; stop it first" >&2
+  exit 1
+else
+  spawn temporal "$brew_bin/temporal" server start-dev --db-filename "$data/temporal.db" --ip 127.0.0.1
+  wait_for temporal 30 temporal_up
+  echo "temporal: started on 127.0.0.1:7233, UI at http://127.0.0.1:8233 (pid $(cat "$run/temporal.pid"))"
+fi
+'''
+
+[tool.poe.tasks.stop-deps]
+help = "Stop only the processes start-deps started (by pid file, never by port)"
+interpreter = "bash"
+verbosity = -1
+shell = '''
+set -uo pipefail
+shopt -s nullglob
+for pidfile in "$PAIDYET_DATA_DIR/run"/*.pid; do
+  name=$(basename "$pidfile" .pid)
+  pid=$(cat "$pidfile")
+  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o comm= | grep -q "$name"; then
+    kill "$pid"
+    for _ in $(seq 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "$name: still running after 10s, sending SIGKILL"
+      kill -9 "$pid"
+    fi
+    echo "$name: stopped (pid $pid)"
+  else
+    echo "$name: not running (removed stale pid file)"
+  fi
+  rm -f "$pidfile"
+done
+'''
+
+[tool.poe.tasks.run]
+help = "Run the app only (expects Ollama and Temporal to be up)"
+cmd = "python main.py"
+
+[tool.poe.tasks.test]
+help = "Unit tests (no running services needed)"
+cmd = "pytest tests/unit"
+
+[tool.poe.tasks.test-integration]
+help = "Integration tests against a running `uv run poe up`"
+cmd = "pytest tests/integration"

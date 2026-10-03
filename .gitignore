@@ -1,0 +1,14 @@
+# Runtime data and environment
+.env
+.data/
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# DevRelay: MLH's text with no license, re-downloaded by DevRelay on every start.
+# Claude Code still loads git-ignored skills.
+.claude/skills/devrelay-*/
+.claude/devrelay-rules.md
