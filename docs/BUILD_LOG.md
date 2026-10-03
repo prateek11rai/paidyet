@@ -173,3 +173,32 @@ A second Claude instance reviewed the repo at `f61a137`. Prateek confirmed the s
 **Test finding.** After these tests were added, two passed alone but failed in the suite, with `env.sleep()` timing out in real time. The cause: a test ended while an activity was in flight, and terminating a workflow mid-activity left a time-skipping lock held in the test server. The fix: `running()` waits for activities to settle before terminating.
 
 137 unit tests (~6 s), stable across repeated runs. The integration flow now snoozes past the next demo reminder, because an earlier snooze is refused by design.
+
+## Sun 4 Oct, ~02:30–03:05: live testing (real Telegram, Sentry, Temporal, Gemma)
+
+**Integration tests: 5/5 pass** against the running stack in 2 min 18 s. That's real Gemma on every sample, a full text cycle, photo deletion and Fix, with Telegram messages going only to the admin, prefixed `[test]`. Getting there turned up three bugs:
+1. **The first start crashed.** `deleteWebhook` during the polling bootstrap hit python-telegram-bot's 5 s read timeout, and the default of *zero* bootstrap retries aborted the app. Now it retries until it succeeds, with 10 s connect and 15 s read/write timeouts.
+2. **A status race.** The workflow incremented `reminders_sent` before sending and moved `next_at` only after, so for a moment the status said "sent" with a stale `next_at`, and a snooze checked against it was refused. The next reminder is now computed first.
+3. **The warm-up logged "loaded in 0 ms"**, because Ollama reports no `load_duration` for an empty prompt. It now logs wall-clock time (7.0 s from a warm disk cache).
+
+**Live flow in Telegram, admin account:**
+- **Bill photo:** a read in 7.4 s (1,098 in / 99 out tokens), then Save. Planned first reminder: Tue 6 Oct 10 AM, 3 days ahead of the Fri 9 Oct due date.
+- **Bill photo, Fix "due in 2 minutes":** Fix in 3.4 s, then Save, reminder at the exact second (02:45:19), Paid 6 s later. The workflow completed `"paid"`, SQLite got `paid_at`, and the message became "✅ Paid".
+- **Hinglish IOU "Rahul ko 500 dene hai in 3 minutes":** read as Rahul · ₹500 · due in 3 minutes, in 12.5 s.
+- **`.data/tmp`** was empty after every read.
+
+**Kill-and-restart proof** (IST, from Temporal's history):
+
+| Time | Event |
+|---|---|
+| 02:55:39 | Saved; durable timer 101.98 s, due 02:57:21 |
+| 02:56:05 | Ctrl-C: app and worker down |
+| 02:57:21.0 | `TIMER_FIRED` in Temporal, with no worker running |
+| 02:57:25 | Temporal and Ollama stopped too: the pending work exists only in `.data/temporal.db` |
+| 02:57:40 | `uv run poe up` again; worker up at 02:57:44.8 |
+| 02:57:42.6 | `WORKFLOW_TASK_TIMED_OUT`: the task had been routed to the dead worker, so Temporal re-dispatched it |
+| 02:57:45.6 | Reminder sent, **24.6 s late, not lost**, under 1 s after the worker came back |
+
+**The Ctrl-C dead end, properly understood this time.** During the proof, Ctrl-C left Ollama and Temporal running again. The earlier explanation (poe re-sends SIGINT every 0.8 s) was only half of it. poe's shutdown loop also *raises the urgency by itself* every 0.8 s, and at level 3 sends **SIGKILL** to the task's process group. Anything that takes more than ~1.6 s to shut down is killed, cleanup included. The Temporal worker with live workflows takes about that long; the earlier test passed only because the app exited instantly. Reproduced 3/3 in a scratch project with a fake app that needs 2 s to stop.
+
+The fix: `up` is now a `cmd` task with `use_exec = true`, so poe hands the process over to `bash -c "$UP_SCRIPT"` and isn't around to escalate. Verified 3/3 in the scratch project, then on the real stack: Ctrl-C with live workflows stopped everything in 3 s, with no pid files left.

@@ -44,20 +44,22 @@ TZ.default = "Asia/Kolkata"
 
 [tool.poe.tasks.up]
 help = "Start Ollama and Temporal, run the app in the foreground, stop the deps on exit or Ctrl-C"
-interpreter = "bash"
+# A cmd task with use_exec: poe hands the process over to bash instead of supervising it. Supervised,
+# poe escalates a Ctrl-C to SIGKILL after 1.6 s, which killed the app mid-shutdown and the cleanup with it.
+cmd = 'bash -c "$UP_SCRIPT"'
+use_exec = true
 verbosity = -1
-shell = '''
-set -euo pipefail
+env.UP_SCRIPT = '''
+set -uo pipefail
 cleanup() {
-  # After Ctrl-C, poe re-sends SIGINT to this process group until we exit. Ignore it,
-  # and give stop-deps its own process group (set -m) so it can finish.
+  # Ignore a second Ctrl-C, and give stop-deps its own process group (set -m) so it can finish.
   trap '' INT TERM
   set -m
   poe stop-deps
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-poe start-deps
+poe start-deps || exit
 python main.py
 '''
 
