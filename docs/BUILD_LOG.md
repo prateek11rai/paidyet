@@ -70,13 +70,13 @@ Verified:
 | Version | Change | Kind | Payee | Amount | Due | Blocked | Silent wrong due | Photo | Text |
 |---|---|---|---|---|---|---|---|---|---|
 | v1 | Baseline prompt | 10 | 8 | 10 | 8 | 0 | 2 | 4.8 s | 3.6 s |
-| v1 + thinking | `think: true` | 9 | 10 | 10 | 8 | 0 | 1 | ~33 s | ~19 s |
 | v2 | Quote the deadline (`due_evidence`), stricter payee rules | 10 | 9 | 10 | 8 | 0 | 2* | 4.3 s | 3.2 s |
+| v2 + thinking | `think: true` | 9 | 10 | 10 | 8 | 0 | 2* | ~33 s | ~19 s |
 | v3 | Code reviews the answer; one hinted retry; a bill with no date blocks Save | 10 | 9 | 10 | 9 | 1 | 0 | 6.7 s | 3.2 s |
 | v4–v5 | Model also lists every date with its label | 10 | 9 | 10 | 8–9 | 1 | 1 (v5) | 8–11 s | 4.8 s |
 | **final** | v3, plus code parses the date out of the quote | **10** | **9** | **10** | **9** | **1** | **0** | **7.0 s** | **3.2 s** |
 
-\* In v2 Gemma found no date on two bills, and the validator quietly defaulted them to "tomorrow". After that, a bill without a due date blocks Save, and only an IOU without a date defaults to tomorrow (with a note).
+\* In v2 (with or without thinking) the validator quietly defaulted a bill with no date to "tomorrow", which counts as silently wrong. After that, a bill without a due date blocks Save, and only an IOU without a date defaults to tomorrow (with a note).
 
 What we learned:
 - **The bill-date trap is real, and it's about choosing, not seeing.** v1 took the insurance *grace period end* (19 Nov) as the due date. But asked plainly to "list every date with its label", Gemma reads `Renew by: 20-10-2026` correctly. The mistake happens when it has to choose.
