@@ -25,17 +25,11 @@ He's on Android, he already lives in Telegram, and he writes in Hinglish. So the
 
 <!-- TODO: replace with the video once it's uploaded, e.g. {% embed https://youtu.be/VIDEO_ID %} -->
 
-![The bot reads a synthetic electricity bill back with the reminder plan, and Save / Fix buttons](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-confirm.png)
-<!-- TODO docs/img/telegram-confirm.png: confirm message for samples/electricity.png. Crop the chat header (your name, username, avatar). -->
+![A phone photo of the synthetic electricity bill; the bot reads it back with the whole reminder plan and Save / Fix](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-confirm.png)
 
-![A reminder with Paid and Snooze](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-reminder.png)
-<!-- TODO docs/img/telegram-reminder.png: a ⏰ reminder with ✅ Paid / 😴 Snooze, ideally after Snooze ("😴 Snoozed until…"). Crop the chat header. -->
-
-![The same reminder after tapping Paid](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-paid.png)
-<!-- TODO docs/img/telegram-paid.png: "✅ Paid on Sun 4 Oct: …". Crop the chat header. -->
+![A reminder for Rahul's ₹500 with the Snooze menu open: Tomorrow, In 3 days, Pick date](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-reminder.png)
 
 ![/due lists what's overdue and upcoming, and who added each one](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-due.png)
-<!-- TODO docs/img/telegram-due.png: the /due reply. Crop the chat header. -->
 
 All the bills in these screenshots are synthetic: fictional companies, fake numbers.
 
@@ -57,7 +51,6 @@ Sentry: one trace from the Telegram update through every activity; Gemma calls a
 It's Python, built on [python-telegram-bot](https://python-telegram-bot.org), [Temporal](https://temporal.io), [Ollama](https://ollama.com) running **gemma4:e4b**, and [Sentry](https://sentry.io). It runs on an Apple M4 with 16 GB. `uv run poe up` starts Ollama (bound to 127.0.0.1), a Temporal dev server and the bot, and Ctrl-C stops all three.
 
 ![Terminal: uv run poe up starting Ollama, Temporal and the bot](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/terminal-up.png)
-<!-- TODO docs/img/terminal-up.png: the poe up start-up lines (ollama / temporal / Sentry enabled / polling as @… / PaidYet is up). Nothing to crop: no secrets are logged. -->
 
 ### Gemma reads, code decides
 
@@ -106,8 +99,7 @@ My laptop sleeps and restarts, so I tested exactly that. I saved "Rahul ko 500 d
 | 02:57:40 | `uv run poe up` again |
 | 02:57:45.6 | The reminder arrives: **24.6 s late, not lost** |
 
-![Temporal UI: the workflow's history with the save signal, the timer and the late reminder](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/temporal-history.png)
-<!-- TODO docs/img/temporal-history.png: History tab, Timeline or Compact view, events collapsed. Do NOT show the Input panel, Queries → status, or expanded show_confirm / send_reminder events: they contain your Telegram user and chat IDs. -->
+![Temporal UI timeline of the kill-and-restart run: read, discard, save signal, timers, reminders, then paid](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/temporal-history.png)
 
 There are 138 unit tests (about 6 s). They run the workflow in Temporal's time-skipping test server, so "nudge daily for a month" takes milliseconds. Five integration tests run the real stack (Gemma, Temporal, Telegram) in about 2 minutes.
 
@@ -115,8 +107,7 @@ There are 138 unit tests (about 6 s). They run the workflow in Temporal's time-s
 
 Each read is an `invoke_agent` span. Inside it are a `gen_ai.chat` span per Gemma call, carrying token counts and how Ollama's time split between loading the model, reading the prompt and generating, and `execute_tool` spans for the two code checks (`review_answer`, `validate_draft`). So the trace shows exactly where code overruled the model. Temporal interceptors carry one trace from the Telegram update into every activity, including a reminder that fires days later.
 
-![Sentry trace: telegram capture → activity read_input → invoke_agent → chat gemma4:e4b and the tool spans](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/sentry-trace.png)
-<!-- TODO docs/img/sentry-trace.png: Explore → Traces, the ~02:55 IST trace, with the chat span's attributes open (model, tokens, ollama.*_ms). Crop your org and project names from the header if you prefer. -->
+![Sentry trace: telegram capture → activity read_input → invoke_agent → chat gemma4:e4b (567 in / 88 out tokens, no input recorded) and the tool spans](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/sentry-trace.png)
 
 What the timings showed me:
 
@@ -148,9 +139,19 @@ The full log, with every number and dead end, is in [docs/BUILD_LOG.md](https://
 
 ## My Agent Session
 
-I built PaidYet with Claude Code as my pair programmer, with DevRelay pulling the challenge rules live. The session below is curated. It covers the kickoff, the Gemma accuracy work, the Temporal workflow, a code review that changed the reminder schedule, live testing, and the kill-and-restart proof.
+I built PaidYet with Claude Code as my pair programmer, with DevRelay pulling the challenge rules live. The session is curated into three parts: thinking and long tool output are trimmed, and local paths and IDs are scrubbed.
 
-<!-- TODO: {% agent_session SESSION_ID %} once the curated session is approved and submitted -->
+**Part 1: the kickoff, and getting Gemma to read bills I could trust**
+
+{% agent_session 417 %}
+
+**Part 2: the Temporal workflow, and a code review that changed the reminder schedule**
+
+{% agent_session 418 %}
+
+**Part 3: live testing in Telegram, and killing the stack mid-wait**
+
+{% agent_session 419 %}
 
 ## Prize Categories
 
