@@ -168,7 +168,8 @@ async def run(settings: Settings) -> None:
         if app is not None:
             await app.start()
             stack.push_async_callback(app.stop)
-            await app.updater.start_polling()
+            # Keep retrying the bootstrap: one slow Telegram response mustn't stop the bot (e.g. right after wake).
+            await app.updater.start_polling(bootstrap_retries=-1)
             stack.push_async_callback(app.updater.stop)
             log.info("Telegram: polling as @%s", app.bot.username)
 

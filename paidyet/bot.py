@@ -583,7 +583,14 @@ async def _react(msg: Message) -> None:
 
 
 def build(settings: Settings, temporal: Client, store: Store) -> Application:
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .connect_timeout(10)
+        .read_timeout(15)
+        .write_timeout(15)
+        .build()
+    )
     app.bot_data["settings"] = settings
     app.bot_data["temporal"] = temporal
     app.bot_data["store"] = store
