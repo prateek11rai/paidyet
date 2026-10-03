@@ -17,9 +17,20 @@ How it works:
 
 1. **Capture.** Send a bill photo or screenshot, forward a message, or type a line in English or Hinglish.
 2. **Gemma reads it.** It fills in title, payee, amount, due date and kind. Plain code then checks the answer: it parses the dates, rejects past due dates and odd amounts, and refuses to save a bill whose date it can't trust.
-3. **Confirm.** "Electricity · ₹1,240 · due Fri 9 Oct · I'll remind you Thu 8 Oct, 7 PM", with **✅ Save** and **✏️ Fix**.
-4. **Temporal reminds.** At 7 PM the day before, then every morning once it's overdue.
-5. **Paid or Snooze.** **✅ Paid** closes it. **😴 Snooze** offers Tomorrow, In 3 days, or a date picker.
+3. **Confirm.** "Electricity · ₹1,240 · due Fri 9 Oct", then the whole plan ("I'll remind you Tue 6 Oct 10 AM, Thu 8 Oct 7 PM, Fri 9 Oct 10 AM and 7 PM, then every morning until it's paid"), with **✅ Save** and **✏️ Fix**.
+4. **Temporal reminds.** On the schedule below, durably, until Paid.
+5. **Paid or Snooze.** **✅ Paid** closes it. **😴 Snooze** offers Tomorrow, In 3 days, or a date picker, and it only ever postpones.
+
+When reminders go out:
+
+| Due | Reminders |
+|---|---|
+| A date ("Friday tak", a bill due 12 Oct) | 10 AM three days before (if it's at least 3 days away), 7 PM the evening before, 10 AM and 7 PM on the day, then 10 AM daily while overdue |
+| A time at least 1 hour away ("in 5 hours") | 30 minutes before and at the deadline, then 10 AM daily |
+| A time 10 minutes to 1 hour away | At the deadline, then 10 AM daily |
+| Under 10 minutes (demo mode, "in 2 minutes") | At the deadline and every 2 minutes after, 5 times in all, then 10 AM daily |
+
+Nothing goes out between 22:00 and 08:00, except demo reminders. A reminder that has to beat the deadline moves earlier, to 21:30; anything else waits until 08:00. After 30 days overdue, PaidYet sends one last message, and the due then waits quietly in `/due` until it's paid.
 
 ## Built for
 
@@ -33,6 +44,8 @@ Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **
 
 > [!NOTE]
 > Gemma runs locally, so it needs real memory and, ideally, a GPU. See [Gemma's docs](https://ai.google.dev/gemma) and the [Ollama model page](https://ollama.com/library/gemma4) for system requirements. We built and tested on an Apple M4 with 16 GB using `gemma4:e4b`: about 3 s to read a text and about 7 s for a photo once the model is loaded. On a smaller machine, set `OLLAMA_MODEL=gemma4:e2b`.
+>
+> PaidYet keeps Gemma loaded for 30 minutes after each read (Ollama's `keep_alive`), so a reply doesn't wait ~20 s for the model to load. The cost is about 6.6 GB of RAM held for those 30 minutes. To free it sooner, lower `OLLAMA_KEEP_ALIVE` in `paidyet/extract.py`.
 
 ## Setup
 
@@ -85,12 +98,13 @@ This starts Ollama (on 127.0.0.1 only) and the Temporal dev server (UI at <http:
 | A bill photo or screenshot | "👀 Reading it…", then the confirm message with ✅ Save / ✏️ Fix |
 | `Rahul ko 500 dene hai Friday tak` | An IOU to Rahul for ₹500, due this Friday |
 | A forwarded message, e.g. "Goa trip ka tera share 3,450 hua, Saturday tak bhej dena" | The sender becomes the payee |
-| `Neha ko 200 dene hai in 2 minutes` | Demo mode: reminds you in 2 minutes, then every 2 minutes until Paid |
-| ✏️ Fix, then `amount is 1340` or `due 12 Oct` | Gemma applies the correction; the confirm message updates |
+| `Neha ko 200 dene hai in 2 minutes` | Demo mode: reminds you in 2 minutes, then every 2 minutes, 5 times in all |
+| ✏️ Fix, then reply `amount is 1340` or `due 12 Oct` | Gemma applies the correction; the confirm message updates. Only a reply to the bot's question counts, so a new IOU is never mistaken for a correction |
+| `/cancel` | Drops a pending Fix or date question |
 | ✅ Paid | The reminder becomes "✅ Paid on Sun 4 Oct: …" and stops |
-| 😴 Snooze | Tomorrow · In 3 days · 📅 Pick date (tap a day or type `12 Oct`) |
+| 😴 Snooze | Tomorrow · In 3 days · 📅 Pick date (tap a day, or reply `12 Oct`). A time before the next scheduled reminder is refused |
 | `/due` | Overdue and upcoming dues, each "added by you" or "added by <admin>", with a Paid button |
-| `/remind arjun ₹500 to Rahul by Fri` (admin) | Adds it to Arjun's list. Arjun gets "<admin> added a reminder for you", and you're told when he pays |
+| `/remind arjun ₹500 to Rahul by Fri` (admin) | Adds it to Arjun's list. Arjun gets "<admin> added a reminder for you" with the plan and a Paid button, and you're told when he pays |
 | A photo captioned `for arjun` (admin) | The same, from a bill photo |
 
 Anyone not on the allowlist gets "This is a private bot. Your Telegram ID is N; send it to the owner." No model call is made for them.
@@ -117,7 +131,7 @@ Anyone not on the allowlist gets "This is a private bot. Your Telegram ID is N; 
 ## Testing
 
 ```sh
-uv run poe test               # 120 unit tests, ~2 s, no services needed
+uv run poe test               # 137 unit tests, ~6 s, no services needed
 uv run poe test-integration   # with `uv run poe up` running in another terminal
 ```
 
@@ -138,7 +152,7 @@ The unit tests run the workflow in Temporal's time-skipping test server, so a we
 
 **Gemma** (gemma4:e4b in Ollama) reads photos and Hinglish through Ollama's JSON-schema structured output, at temperature 0 with thinking off. It's asked to *quote* the words around the deadline ("Pay by 12 Oct 2026"), and code parses the date out of that quote. When code spots a known mistake, such as a bill with no due date or a date labelled "grace period", it asks Gemma once more with a pointed hint, and a draft that's still wrong can't be saved. On our samples that means no silently wrong due dates. The numbers and dead ends are in [docs/BUILD_LOG.md](docs/BUILD_LOG.md).
 
-**Temporal** runs one `ReminderWorkflow` per due, from the moment a message arrives. Reading the bill is a retried activity, so a slow model load or bad JSON just gets another try. The input is deleted after the read, on success or final failure. Then the workflow waits durably for Save or Fix, sends reminders on timers, and reacts to Paid and Snooze signals. Killing the worker mid-wait and restarting it loses nothing.
+**Temporal** runs one `ReminderWorkflow` per due, from the moment a message arrives. Reading the bill is a retried activity, so a slow model load or bad JSON just gets another try. The input is deleted after the read, on success or final failure. Then the workflow waits durably for Save or Fix, sends reminders on timers, and reacts to Paid and Snooze signals. Its SQLite writes get five tries and then report the failure, while Telegram sends keep retrying through an offline laptop. A long-overdue due continues-as-new, so its history stays short. Killing the worker mid-wait and restarting it loses nothing.
 
 **Sentry Agent Tracing** shows each read as an `invoke_agent` span. Inside it are a `gen_ai.chat` span per Gemma call (tokens, plus how Ollama's time split between loading the model, reading the prompt and generating) and `execute_tool` spans for the code checks. Temporal interceptors keep one trace from the Telegram update through the workflow into every activity, including a reminder sent days later.
 

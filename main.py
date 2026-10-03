@@ -181,7 +181,7 @@ async def run(settings: Settings) -> None:
 async def warm_up_model(http: httpx.AsyncClient, model: str) -> None:
     """Load Gemma now so the first message doesn't wait ~20 s for it."""
     try:
-        r = await http.post("/api/generate", json={"model": model, "keep_alive": "5m"})
+        r = await http.post("/api/generate", json={"model": model, "keep_alive": extract.OLLAMA_KEEP_ALIVE})
         r.raise_for_status()
         log.info("Ollama: %s loaded in %d ms", model, r.json().get("load_duration", 0) // 1_000_000)
     except httpx.HTTPError as e:

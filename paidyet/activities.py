@@ -28,6 +28,12 @@ from paidyet.workflows import (
 log = logging.getLogger(__name__)
 
 
+def _refused(e: Exception) -> ApplicationError:
+    """Telegram said no for a reason retrying won't change (blocked, bad request): final for this call."""
+    kind = "Forbidden" if isinstance(e, Forbidden) else "BadRequest"
+    return ApplicationError(f"Telegram refused: {type(e).__name__}", type=kind, non_retryable=True)
+
+
 def _gone(what: str) -> ApplicationError:
     # Inputs don't survive a restart (photos are swept, texts live in memory): ask the user to resend.
     return ApplicationError(f"{what} is gone", type="InputGone", non_retryable=True)
@@ -62,6 +68,7 @@ class Activities:
             self.save_reminder,
             self.set_next,
             self.mark_paid,
+            self.show_paid,
             self.notify,
         ]
 
@@ -139,8 +146,8 @@ class Activities:
                 self._chat(chat_id), self.prefix + text, reply_markup=markup,
                 reply_to_message_id=None if self.only_chat else reply_to, allow_sending_without_reply=True,
             )  # fmt: skip
-        except Forbidden as e:
-            raise ApplicationError("the user blocked the bot", type="Forbidden", non_retryable=True) from e
+        except (Forbidden, BadRequest) as e:
+            raise _refused(e) from e
         return msg.message_id
 
     async def _edit(self, chat_id: int, message_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool:
@@ -152,9 +159,9 @@ class Activities:
                 return True
             if "not found" in str(e).lower() or "can't be edited" in str(e).lower():
                 return False
-            raise
+            raise _refused(e) from e
         except Forbidden as e:
-            raise ApplicationError("the user blocked the bot", type="Forbidden", non_retryable=True) from e
+            raise _refused(e) from e
 
     async def _strip_buttons(self, chat_id: int, message_id: int) -> None:
         try:
@@ -175,12 +182,12 @@ class Activities:
         if view.previous_message_id:
             await self._strip_buttons(view.chat_id, view.previous_message_id)
         text = ui.reminder_text(view, self.settings)
-        return await self._send(view.chat_id, text, ui.reminder_keyboard(view.reminder_id))
+        return await self._send(view.chat_id, text, ui.reminder_keyboard(view.reminder_id, view.reason))
 
     @activity.defn(name="edit_reminder")
     async def edit_reminder(self, view: ReminderView) -> int:
         text = ui.reminder_text(view, self.settings)
-        markup = ui.reminder_keyboard(view.reminder_id)
+        markup = ui.reminder_keyboard(view.reminder_id, view.reason)
         if view.previous_message_id and await self._edit(view.chat_id, view.previous_message_id, text, markup):
             return view.previous_message_id
         return await self._send(view.chat_id, text, markup)
@@ -191,7 +198,17 @@ class Activities:
             return
         await self._send(notice.chat_id, notice.text, reply_to=notice.reply_to)
 
-    # --- SQLite (and the Paid message) ---
+    @activity.defn(name="show_paid")
+    async def show_paid(self, update: PaidUpdate) -> None:
+        paid_at = datetime.fromisoformat(update.paid_at)
+        text = ui.paid_text(update.draft, paid_at, self.settings.tz)
+        if not (update.message_id and await self._edit(update.owner_id, update.message_id, text)):
+            await self._send(update.owner_id, text)
+        if update.added_by != update.owner_id:
+            who = self.settings.name_of(update.owner_id)
+            await self._send(update.added_by, f"✅ {who} paid: {ui.summary(update.draft, self.settings.tz)}")
+
+    # --- SQLite ---
 
     @activity.defn(name="save_reminder")
     async def save_reminder(self, saved: SavedReminder) -> None:
@@ -206,10 +223,3 @@ class Activities:
     @activity.defn(name="mark_paid")
     async def mark_paid(self, update: PaidUpdate) -> None:
         self.store.mark_paid(update.reminder_id, update.paid_at)
-        paid_at = datetime.fromisoformat(update.paid_at)
-        text = ui.paid_text(update.draft, paid_at, self.settings.tz)
-        if not (update.message_id and await self._edit(update.owner_id, update.message_id, text)):
-            await self._send(update.owner_id, text)
-        if update.added_by != update.owner_id:
-            who = self.settings.name_of(update.owner_id)
-            await self._send(update.added_by, f"✅ {who} paid: {ui.summary(update.draft, self.settings.tz)}")

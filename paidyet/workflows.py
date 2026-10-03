@@ -4,7 +4,7 @@ Activities are called by name so their I/O libraries never enter Temporal's work
 """
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
 from temporalio import workflow
@@ -20,11 +20,22 @@ from temporalio.worker import (
 with workflow.unsafe.imports_passed_through():
     from paidyet.extract import Draft
 
-EVENING = time(19, 0)  # the reminder the day before
-MORNING = time(10, 0)  # due-day and overdue nudges, snoozes
-CONFIRM_WINDOW = timedelta(days=7)
+# The schedule (see `plan` and `next_reminder`).
+MORNING = time(10, 0)  # early notice, due day, overdue nudges, snoozes
+EVENING = time(19, 0)  # the evening before, and the due day's last call
+QUIET_START, QUIET_END = time(22, 0), time(8, 0)
+QUIET_EARLIER = time(21, 30)  # where a pre-deadline reminder goes instead of into quiet hours
+EARLY_NOTICE = timedelta(days=3)
+LEAD = timedelta(minutes=30)  # timed dues at least LEAD_FROM away get a reminder this much before
+LEAD_FROM = timedelta(hours=1)
+DEMO_WINDOW = timedelta(minutes=10)  # dues closer than this repeat at their own pace (demos)
+DEMO_REPEATS = 5
 MIN_NUDGE = timedelta(minutes=1)
+OVERDUE_CAP = timedelta(days=30)  # then one last message, and the reminder lives on in /due only
 DAY = timedelta(days=1)
+
+CONFIRM_WINDOW = timedelta(days=7)
+CONTINUE_AFTER = 50  # reminders per run before continue-as-new keeps the history short
 
 READ_ATTEMPTS = 3
 READ = dict(
@@ -33,14 +44,33 @@ READ = dict(
         initial_interval=timedelta(seconds=2), maximum_attempts=READ_ATTEMPTS, non_retryable_error_types=["InputGone"]
     ),
 )
-QUICK = dict(
+TELEGRAM = dict(
     start_to_close_timeout=timedelta(seconds=30),
-    # Telegram may be unreachable while the laptop is offline: keep trying, slowly.
-    retry_policy=RetryPolicy(maximum_interval=timedelta(minutes=5), non_retryable_error_types=["Forbidden"]),
+    # Telegram may be unreachable while the laptop is offline: keep trying, slowly. A refusal is final.
+    retry_policy=RetryPolicy(maximum_interval=timedelta(minutes=5), non_retryable_error_types=["Forbidden", "BadRequest"]),
+)
+STORE = dict(
+    start_to_close_timeout=timedelta(seconds=10),
+    # SQLite and local files: if they fail five times, it's a bug, not weather. Fail and say so.
+    retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30), maximum_attempts=5),
 )
 
 
 # --- Payloads. Only IDs, keys and validated fields: never images or raw text. ---------------------
+
+
+@dataclass
+class Carry:
+    """State handed to the next run by continue-as-new."""
+
+    draft: Draft
+    set_at: str
+    saved_at: str
+    next_at: str | None
+    sent: int
+    message_id: int | None
+    snooze_until: str | None
+    snooze_applied: str | None  # a snooze can arrive just before the hand-over, not yet applied
 
 
 @dataclass
@@ -53,6 +83,7 @@ class ReminderInput:
     sent_at: str  # ISO; relative dates ("Friday tak") are read from this moment
     photo_name: str | None = None
     text_key: str | None = None
+    carry: Carry | None = None
 
 
 @dataclass
@@ -76,8 +107,9 @@ class ConfirmView:
     draft: Draft
     owner_id: int
     added_by: int
-    remind_at: str | None
     state: str  # "draft" | "saved" | "expired"
+    plan: list[str] = field(default_factory=list)  # upcoming reminders, before the daily overdue ones
+    demo_every_s: int | None = None
 
 
 @dataclass
@@ -87,10 +119,12 @@ class ReminderView:
     draft: Draft
     owner_id: int
     added_by: int
-    reason: str  # "added" (the admin added it for you) | "reminder" | "snoozed"
+    reason: str  # "added" | "reminder" | "snoozed" | "last"
     now: str
     next_at: str | None = None
     previous_message_id: int | None = None  # strip its buttons, or edit it when snoozing
+    plan: list[str] = field(default_factory=list)
+    demo_every_s: int | None = None
 
 
 @dataclass
@@ -99,7 +133,7 @@ class SavedReminder:
     owner_id: int
     added_by: int
     draft: Draft
-    next_at: str
+    next_at: str | None
 
 
 @dataclass
@@ -122,7 +156,7 @@ class Notice:
 
 @dataclass
 class Status:
-    state: str  # reading | confirming | fixing | scheduled | paid | failed | expired
+    state: str  # reading | confirming | fixing | scheduled | parked | paid | failed | expired
     owner_id: int
     added_by: int
     draft: Draft | None = None
@@ -132,37 +166,56 @@ class Status:
     message_id: int | None = None
 
 
-# --- Schedule: pure functions of the due date and "now" -----------------------------------------
+# --- Schedule: pure functions of the due date and when it was set ---------------------------------
 
 
 def _at(d, t: time, tz) -> datetime:
     return datetime.combine(d, t, tzinfo=tz)
 
 
-def first_reminder(due: datetime, has_time: bool, now: datetime) -> datetime:
-    """Date dues: 7 PM the day before, else 10 AM or 7 PM on the day, else in a minute. Timed dues: at that time."""
-    if has_time:
-        return max(due, now)
-    local = now.astimezone(due.tzinfo)
-    for candidate in (_at(due.date() - DAY, EVENING, due.tzinfo), _at(due.date(), MORNING, due.tzinfo), _at(due.date(), EVENING, due.tzinfo)):
-        if candidate > local:
-            return candidate
-    return local + MIN_NUDGE
+def _quiet(when: datetime, before_deadline: bool) -> datetime:
+    """Keep reminders out of 22:00–08:00: earlier (21:30) if it must beat the deadline, else later (08:00)."""
+    t, tz = when.timetz().replace(tzinfo=None), when.tzinfo
+    if QUIET_END <= t < QUIET_START:
+        return when
+    if before_deadline:
+        return _at(when.date() if t >= QUIET_START else when.date() - DAY, QUIET_EARLIER, tz)
+    return _at(when.date() + DAY if t >= QUIET_START else when.date(), QUIET_END, tz)
 
 
-def nudge_interval(due: datetime, has_time: bool, sent_at: datetime) -> timedelta:
-    """Daily, except a short demo due ("in 2 minutes") repeats at its own pace, from 1 minute up to a day."""
+def demo_every(due: datetime, has_time: bool, set_at: datetime) -> timedelta | None:
+    """A due set less than 10 minutes ahead is a demo: it repeats at that pace, a few times."""
+    lead = due - set_at
+    return max(lead, MIN_NUDGE) if has_time and lead < DEMO_WINDOW else None
+
+
+def plan(due: datetime, has_time: bool, set_at: datetime, saved_at: datetime) -> list[datetime]:
+    """The reminders before the daily overdue nudges begin. `set_at` is when the due was read or fixed."""
+    tz = due.tzinfo
     if not has_time:
-        return DAY
-    return min(max(due - sent_at, MIN_NUDGE), DAY)
+        d = due.date()
+        early = [_at(d - EARLY_NOTICE, MORNING, tz)] if d - saved_at.astimezone(tz).date() >= EARLY_NOTICE else []
+        return early + [_at(d - DAY, EVENING, tz), _at(d, MORNING, tz), _at(d, EVENING, tz)]
+    if every := demo_every(due, has_time, set_at):
+        return [due + every * k for k in range(DEMO_REPEATS)]
+    slots = {_quiet(due, before_deadline=False)}
+    if due - set_at >= LEAD_FROM:
+        slots.add(_quiet(due - LEAD, before_deadline=True))
+    return sorted(slots)
 
 
-def next_nudge(due: datetime, has_time: bool, fired_at: datetime, every: timedelta) -> datetime:
-    """After a reminder: 10 AM on the due day, then 10 AM every day until Paid."""
-    if has_time:
-        return fired_at + every
-    local = fired_at.astimezone(due.tzinfo)
-    return _at(max(due.date(), local.date() + DAY), MORNING, due.tzinfo)
+def next_reminder(due: datetime, has_time: bool, slots: list[datetime], after: datetime) -> datetime | None:
+    """The first reminder strictly after `after`: a planned one, else 10 AM daily while overdue, for 30 days."""
+    for slot in slots:
+        if slot > after:
+            return slot
+    tz = due.tzinfo
+    candidate = _at(after.astimezone(tz).date(), MORNING, tz)
+    if candidate <= after:
+        candidate += DAY
+    if not has_time:
+        candidate = max(candidate, _at(due.date() + DAY, MORNING, tz))
+    return candidate if candidate <= due + OVERDUE_CAP else None
 
 
 # --- The workflow ----------------------------------------------------------------------------------
@@ -181,6 +234,9 @@ class ReminderWorkflow:
         self._sent = 0
         self._paid_at: datetime | None = None
         self._message_id: int | None = None
+        self._set_at: datetime | None = None
+        self._saved_at: datetime | None = None
+        self._applied: datetime | None = None  # the last snooze the loop acted on
 
     # Signals: the buttons. The bot checks who tapped before it signals.
 
@@ -217,10 +273,14 @@ class ReminderWorkflow:
     @workflow.run
     async def run(self, inp: ReminderInput) -> str:
         self._inp = inp
-        if not await self._read():
-            return self._state
-        if not await self._confirm():
-            return self._state
+        if inp.carry is None:
+            if not await self._read():
+                return self._state
+            if not await self._confirm():
+                return self._state
+            await self._save()
+        else:
+            self._resume(inp.carry)
         await self._remind()
         return self._state
 
@@ -233,7 +293,7 @@ class ReminderWorkflow:
             self._state = "failed"
         finally:
             # Success or final failure: the photo and the text are gone from here on.
-            await workflow.execute_activity("discard_input", request, **QUICK)
+            await self._store("discard_input", request)
         if self._state == "failed":
             await self._notice(
                 "Sorry, I couldn't read that. Send it again, or type it like: Rahul ko 500 dene hai Friday tak",
@@ -266,73 +326,144 @@ class ReminderWorkflow:
                 self._state = "confirming"
                 await self._show_confirm("draft")
 
-    async def _remind(self) -> None:
-        inp, draft = self._inp, self._draft
-        due = datetime.fromisoformat(draft.due_at)
-        every = nudge_interval(due, draft.has_time, datetime.fromisoformat(inp.sent_at))
+    async def _save(self) -> None:
+        inp = self._inp
+        self._set_at = self._draft_set_at()
+        self._saved_at = workflow.now()
+        self._next_at = next_reminder(self._due(), self._draft.has_time, self._slots(), self._saved_at)
         self._state = "scheduled"
-        self._next_at = first_reminder(due, draft.has_time, workflow.now())
-        await workflow.execute_activity(
-            "save_reminder",
-            SavedReminder(self._rid(), inp.owner_id, inp.added_by, draft, self._next_at.isoformat()),
-            **QUICK,
-        )
+        if not await self._store("save_reminder", self._saved()):
+            await self._notice("Saved, but I couldn't add it to /due. The reminders still work.")
         await self._show_confirm("saved")
         if inp.added_by != inp.owner_id:
             await self._show_reminder("added")
 
-        applied = None
+    def _resume(self, carry: Carry) -> None:
+        self._draft = carry.draft
+        self._set_at = datetime.fromisoformat(carry.set_at)
+        self._saved_at = datetime.fromisoformat(carry.saved_at)
+        self._next_at = datetime.fromisoformat(carry.next_at) if carry.next_at else None
+        self._sent = carry.sent
+        self._message_id = carry.message_id
+        self._snooze_until = datetime.fromisoformat(carry.snooze_until) if carry.snooze_until else None
+        self._applied = datetime.fromisoformat(carry.snooze_applied) if carry.snooze_applied else None
+        self._state = "scheduled" if self._next_at else "parked"
+
+    async def _remind(self) -> None:
+        due, has_time, slots = self._due(), self._draft.has_time, self._slots()
+        sent_this_run = 0
         while not self._paid:
-            if self._snooze_until is not None and self._snooze_until != applied:
-                applied = self._snooze_until
-                if applied > workflow.now():
-                    self._next_at = applied
-                    await self._store_next()
+            if self._next_at is None:  # 30 days overdue: say so once, then wait in /due for Paid
+                if self._state != "parked":
+                    self._state = "parked"
+                    await self._store("set_next", self._saved())
+                    await self._show_reminder("last")
+                await workflow.wait_condition(lambda: self._paid)
+                break
+            if sent_this_run >= CONTINUE_AFTER or workflow.info().is_continue_as_new_suggested():
+                workflow.continue_as_new(ReminderInput(**{**self._inp.__dict__, "carry": self._carry()}))
+            if self._snooze_until is not None and self._snooze_until != self._applied:
+                self._applied = self._snooze_until
+                # A snooze only ever postpones: an earlier time would skip ahead of the schedule.
+                if self._applied > self._next_at:
+                    self._next_at = self._applied
+                    await self._store("set_next", self._saved())
                     await self._show_reminder("snoozed", edit=True)
             wait = (self._next_at - workflow.now()).total_seconds()
             if wait > 0:
                 try:
                     await workflow.wait_condition(
-                        lambda: self._paid or self._snooze_until != applied, timeout=timedelta(seconds=wait)
+                        lambda: self._paid or self._snooze_until != self._applied, timeout=timedelta(seconds=wait)
                     )
                     continue  # Paid or a new snooze: handled at the top of the loop
                 except asyncio.TimeoutError:
                     pass
             self._sent += 1
+            sent_this_run += 1
             await self._show_reminder("reminder")
-            self._next_at = next_nudge(due, draft.has_time, workflow.now(), every)
-            await self._store_next()
+            # After a long sleep, skip the reminders we slept through instead of sending them in a burst.
+            self._next_at = next_reminder(due, has_time, slots, max(self._next_at, workflow.now()))
+            await self._store("set_next", self._saved())
 
         self._state = "paid"
         self._paid_at = workflow.now()
         self._next_at = None
-        await workflow.execute_activity(
-            "mark_paid",
-            PaidUpdate(self._rid(), inp.owner_id, inp.added_by, draft, self._paid_at.isoformat(), self._message_id),
-            **QUICK,
-        )
+        update = PaidUpdate(self._rid(), self._inp.owner_id, self._inp.added_by, self._draft,
+                            self._paid_at.isoformat(), self._message_id)  # fmt: skip
+        await self._store("mark_paid", update)
+        await self._telegram("show_paid", update)
 
     # Helpers that turn state into activity calls.
 
     def _rid(self) -> str:
         return workflow.info().workflow_id
 
-    async def _store_next(self) -> None:
+    def _due(self) -> datetime:
+        return datetime.fromisoformat(self._draft.due_at)
+
+    def _draft_set_at(self) -> datetime:
+        return datetime.fromisoformat(self._draft.read_at) if self._draft.read_at else workflow.now()
+
+    def _slots(self) -> list[datetime]:
+        return plan(self._due(), self._draft.has_time, self._set_at, self._saved_at)
+
+    def _upcoming(self) -> tuple[list[str], int | None]:
+        """The planned reminders still ahead, for messages that state the whole plan. Before Save: as if saved now."""
+        due, has_time, now = self._due(), self._draft.has_time, workflow.now()
+        set_at = self._set_at or self._draft_set_at()
+        slots = plan(due, has_time, set_at, self._saved_at or now)
+        ahead = [s for s in slots if s > now]
+        if not ahead and (first_overdue := next_reminder(due, has_time, slots, now)):
+            ahead = [first_overdue]
+        every = demo_every(due, has_time, set_at)
+        return [s.isoformat() for s in ahead], int(every.total_seconds()) if every else None
+
+    def _saved(self) -> SavedReminder:
         inp = self._inp
-        saved = SavedReminder(self._rid(), inp.owner_id, inp.added_by, self._draft, self._next_at.isoformat())
-        await workflow.execute_activity("set_next", saved, **QUICK)
+        return SavedReminder(self._rid(), inp.owner_id, inp.added_by, self._draft,
+                             self._next_at.isoformat() if self._next_at else None)  # fmt: skip
+
+    def _carry(self) -> Carry:
+        return Carry(
+            draft=self._draft,
+            set_at=self._set_at.isoformat(),
+            saved_at=self._saved_at.isoformat(),
+            next_at=self._next_at.isoformat() if self._next_at else None,
+            sent=self._sent,
+            message_id=self._message_id,
+            snooze_until=self._snooze_until.isoformat() if self._snooze_until else None,
+            snooze_applied=self._applied.isoformat() if self._applied else None,
+        )
+
+    async def _store(self, name: str, payload) -> bool:
+        try:
+            await workflow.execute_activity(name, payload, **STORE)
+            return True
+        except ActivityError:
+            # Each failed attempt is already in Sentry and the logs; the reminder itself carries on.
+            # (A failed discard_input leaves a file in .data/tmp, which the start-up sweep deletes.)
+            workflow.logger.error("local activity %s failed after %d attempts", name, STORE["retry_policy"].maximum_attempts)
+            return False
+
+    async def _telegram(self, name: str, payload, result_type=None):
+        try:
+            return await workflow.execute_activity(name, payload, result_type=result_type, **TELEGRAM)
+        except ActivityError:
+            workflow.logger.warning("Telegram activity %s was refused", name)
+            return None
 
     async def _show_confirm(self, state: str) -> None:
         inp = self._inp
-        remind_at = None
+        plan_, every = ([], None)
         if self._draft.ready and state != "expired":
-            due = datetime.fromisoformat(self._draft.due_at)
-            remind_at = (self._next_at or first_reminder(due, self._draft.has_time, workflow.now())).isoformat()
-        view = ConfirmView(self._rid(), inp.origin_chat_id, inp.status_message_id, self._draft, inp.owner_id, inp.added_by, remind_at, state)
-        await workflow.execute_activity("show_confirm", view, **QUICK)
+            plan_, every = self._upcoming()
+        view = ConfirmView(self._rid(), inp.origin_chat_id, inp.status_message_id, self._draft, inp.owner_id,
+                           inp.added_by, state, plan_, every)  # fmt: skip
+        await self._telegram("show_confirm", view)
 
     async def _show_reminder(self, reason: str, edit: bool = False) -> None:
         inp = self._inp
+        plan_, every = self._upcoming() if reason == "added" else ([], None)
         view = ReminderView(
             reminder_id=self._rid(),
             chat_id=inp.owner_id,
@@ -343,24 +474,23 @@ class ReminderWorkflow:
             now=workflow.now().isoformat(),
             next_at=self._next_at.isoformat() if self._next_at else None,
             previous_message_id=self._message_id,
+            plan=plan_,
+            demo_every_s=every,
         )
         name = "edit_reminder" if edit and self._message_id else "send_reminder"
-        try:
-            message_id = await workflow.execute_activity(name, view, result_type=int, **QUICK)
-        except ActivityError:
-            # Telegram refuses to message someone who never opened the bot (or blocked it). Keep the
-            # reminder alive and tell whoever added it; the next nudge tries again.
-            if reason == "added":
-                await self._notice(
-                    "I couldn't message them on Telegram. Ask them to open the bot and send /start; "
-                    "I'll keep trying at each reminder."
-                )
-            return
+        message_id = await self._telegram(name, view, result_type=int)
+        if message_id is None and reason == "added":
+            # Telegram won't let a bot message someone who never opened it. Keep the reminder alive,
+            # tell whoever added it, and try again at each reminder.
+            await self._notice(
+                "I couldn't message them on Telegram. Ask them to open the bot and send /start; "
+                "I'll keep trying at each reminder."
+            )
         self._message_id = message_id or self._message_id
 
     async def _notice(self, text: str, edit: int | None = None, reply: int | None = None) -> None:
         notice = Notice(chat_id=self._inp.origin_chat_id, text=text, reply_to=reply, edit_message_id=edit)
-        await workflow.execute_activity("notify", notice, **QUICK)
+        await self._telegram("notify", notice)
 
 
 # --- Tracing: carry the Sentry trace from workflow start to every activity ----------------------

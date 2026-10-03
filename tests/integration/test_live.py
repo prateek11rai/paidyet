@@ -82,11 +82,12 @@ async def test_text_save_remind_snooze_remind_paid(settings, temporal, worker, t
         row = store.get(handle.id)
         assert (row.title, row.amount_inr, row.paid_at) == (d.title, 500.0, None)
 
-        await until(handle, lambda s: s.reminders_sent == 1, seconds=30)
-        snooze_to = datetime.now(settings.tz) + timedelta(seconds=5)
+        status = await until(handle, lambda s: s.reminders_sent == 1, seconds=30)
+        # A snooze only postpones, so push past the next demo reminder (a minute after the first).
+        snooze_to = datetime.fromisoformat(status.next_at) + timedelta(seconds=5)
         await handle.signal(ReminderWorkflow.snooze, snooze_to.isoformat())
         await until(handle, lambda s: s.next_at == snooze_to.isoformat())
-        await until(handle, lambda s: s.reminders_sent == 2, seconds=30)
+        await until(handle, lambda s: s.reminders_sent == 2, seconds=90)
 
         await handle.signal(ReminderWorkflow.paid)
         assert await handle.result() == "paid"

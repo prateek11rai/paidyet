@@ -23,6 +23,8 @@ MAX_AMOUNT_INR = 1_000_000
 LOW_CONFIDENCE = 0.5
 PHOTO_SUFFIXES = (".jpg", ".png", ".webp")
 PHOTO_NAME = re.compile(r"^[0-9a-f]{32}\.(jpg|png|webp)$")
+# Keep Gemma loaded between messages: a cold load costs ~20 s, staying loaded costs ~6.6 GB of RAM.
+OLLAMA_KEEP_ALIVE = "30m"
 
 SCHEMA = {
     "type": "object",
@@ -89,6 +91,7 @@ class Draft:
     confidence: float
     problems: list[str] = field(default_factory=list)  # block Save; the user taps Fix
     notes: list[str] = field(default_factory=list)  # shown, but Save still allowed
+    read_at: str | None = None  # the moment relative times ("in 2 minutes") were measured from
 
     @property
     def ready(self) -> bool:
@@ -148,6 +151,7 @@ async def ask_gemma(
         "format": SCHEMA,
         "stream": False,
         "think": think,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {"temperature": 0},
     }
     # The span records the model, tokens and Ollama's timings. Never the prompt, the image or the reply.
@@ -454,6 +458,7 @@ def validate(raw: dict, now: datetime) -> Draft:
         confidence=round(confidence, 2),
         problems=problems,
         notes=notes,
+        read_at=now.isoformat(),
     )
 
 

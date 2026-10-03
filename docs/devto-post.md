@@ -15,8 +15,8 @@ It's never about the money. Arjun has it. His share of a dinner someone else pai
 **PaidYet** is a Telegram bot that runs on my laptop and doesn't let that happen:
 
 - Arjun forwards a bill, sends a screenshot, or types "Rahul ko 500 dene hai Friday tak" ("I owe Rahul 500 by Friday").
-- **Gemma**, running locally, reads it. The bot replies with what it read ("₹500 to Rahul · due Fri 9 Oct · I'll remind you Thu 8 Oct, 7 PM"), and he taps **Save**. <!-- TODO: match the wording to the real screenshot -->
-- A **Temporal** workflow then reminds him the evening before, and every morning once it's overdue, until he taps **Paid**. **Snooze** offers Tomorrow, In 3 days, or a date picker.
+- **Gemma**, running locally, reads it. The bot replies with what it read and the whole plan ("₹500 to Rahul · due Fri 9 Oct · I'll remind you Thu 8 Oct 7 PM, Fri 9 Oct 10 AM and 7 PM, then every morning until it's paid"), and he taps **Save**. <!-- TODO: match the wording to the real screenshot -->
+- A **Temporal** workflow then reminds him: three days ahead for anything far off, the evening before, twice on the day, and every morning once it's overdue, until he taps **Paid**. **Snooze** offers Tomorrow, In 3 days, or a date picker. Nothing arrives between 10 PM and 8 AM.
 - When I know he owes something, like our trip split, I add it for him as the admin. Every reminder says whether *he* added it or *I* did, so nothing feels like it came out of nowhere.
 
 He's on Android, he's already on Telegram, and he writes in Hinglish. So: no app to install, no account to create, and Hinglish works.
@@ -68,7 +68,9 @@ Every due is one `ReminderWorkflow`, started the moment a message arrives:
 - **Reading the bill is an activity with retries.** A cold model load takes ~22 s, and a bad JSON reply happens. Temporal retries both, up to three attempts.
 - **The photo is deleted in a `finally`.** That runs on success *and* after the final failed retry.
 - **Save, Fix, Paid and Snooze are signals, and `status` is a query.** The bot asks the workflow who added a due before it lets anyone tap Save, and who owes it before Paid.
-- **Reminders are durable timers.** 7 PM the day before, then 10 AM every day until Paid. A demo due ("in 2 minutes") repeats at its own pace, so the whole cycle fits in a video without a fake clock.
+- **Reminders are durable timers.** For a date: 10 AM three days before, 7 PM the evening before, 10 AM and 7 PM on the day, then 10 AM daily while overdue, never between 10 PM and 8 AM. After 30 days overdue, one last message, and then it waits quietly in `/due`. A due set less than 10 minutes ahead is a demo: it repeats every few minutes, five times, so the whole cycle fits in a video without a fake clock.
+- **Snooze only postpones.** The workflow ignores a snooze that would land before the next scheduled reminder, and the bot says so.
+- **Long-overdue dues continue-as-new,** carrying their state over, so a month of nudges never bloats one history.
 
 My laptop sleeps. Telegram holds updates for 24 hours, and Temporal fires missed timers when it wakes, so a reminder can be late but never lost. To prove it, I killed the worker mid-wait and restarted it:
 

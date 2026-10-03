@@ -27,7 +27,7 @@ from paidyet import extract
 from paidyet.config import TASK_QUEUE, Settings
 from paidyet.extract import Draft
 from paidyet.store import Row, Store
-from paidyet.workflows import MORNING, ConfirmView, ReminderInput, ReminderView, ReminderWorkflow
+from paidyet.workflows import MORNING, ConfirmView, ReminderInput, ReminderView, ReminderWorkflow, Status
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +103,25 @@ def _span(delta: timedelta) -> str:
     return f"{minutes // (24 * 60)} days"
 
 
+def plan_phrase(plan: list[str], demo_every_s: int | None, now: datetime, tz) -> str:
+    """The whole plan: "Tue 6 Oct 10 AM, Thu 8 Oct 7 PM, Fri 9 Oct 10 AM and 7 PM, then every morning until it's paid"."""
+    times = [datetime.fromisoformat(t).astimezone(tz) for t in plan]
+    then = "then every morning until it's paid"
+    if not times:
+        return "every morning until it's paid"
+    if demo_every_s:
+        every = max(1, round(demo_every_s / 60))
+        return f"{remind_phrase(times[0], now)}, then every {every} min ({len(times)} times in all), {then}"
+    by_day: dict[date, list[str]] = {}
+    for t in times:
+        by_day.setdefault(t.date(), []).append(clock(t))
+    parts = []
+    for d, clocks in by_day.items():
+        label = "today" if d == now.date() else "tomorrow" if d == now.date() + timedelta(days=1) else day(d)
+        parts.append(f"{label} {' and '.join(clocks)}")
+    return f"{', '.join(parts)}, {then}"
+
+
 def added_by(added: int, viewer: int, settings: Settings) -> str:
     return "added by you" if added == viewer else f"added by {settings.name_of(added)}"
 
@@ -125,9 +144,8 @@ def confirm_text(view: ConfirmView, settings: Settings, now: datetime) -> str:
         lines.append(summary(d, settings.tz))
     owner = "you" if view.owner_id == viewer else settings.name_of(view.owner_id)
     lines.append(f"For {owner} · {added_by(view.added_by, viewer, settings)}")
-    if view.remind_at:
-        at = datetime.fromisoformat(view.remind_at).astimezone(settings.tz)
-        lines.append(f"I'll remind {owner} {remind_phrase(at, now)}.")
+    if view.plan:
+        lines.append(f"I'll remind {owner} {plan_phrase(view.plan, view.demo_every_s, now, settings.tz)}.")
     if view.state == "draft":
         lines += [f"⚠️ {p}" for p in d.problems] + [f"ℹ️ {n}" for n in d.notes]
         if d.problems:
@@ -143,13 +161,14 @@ def reminder_text(view: ReminderView, settings: Settings) -> str:
     head = f"{d.title} · {inr(d.amount_inr)}{payee}"
     who = added_by(view.added_by, view.owner_id, settings)
     if view.reason == "added":
-        at = datetime.fromisoformat(view.next_at).astimezone(settings.tz)
         return (
             f"{settings.name_of(view.added_by)} added a reminder for you:\n{head} · due {when(due, d.has_time)}\n"
-            f"I'll remind you {remind_phrase(at, now)}."
+            f"I'll remind you {plan_phrase(view.plan, view.demo_every_s, now, settings.tz)}."
         )
     status = due_status(due, d.has_time, now)
     text = f"⏰ {head}\n{status[0].upper()}{status[1:]} · {who}"
+    if view.reason == "last":
+        text += "\nThat's a month overdue, so I'll stop reminding you. It stays in /due until you tap Paid."
     if view.reason == "snoozed" and view.next_at:
         at = datetime.fromisoformat(view.next_at).astimezone(settings.tz)
         text += f"\n😴 Snoozed until {remind_phrase(at, now)}."
@@ -172,8 +191,12 @@ def confirm_keyboard(rid: str, draft: Draft) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row + [_button("✏️ Fix", f"fix:{rid}")]])
 
 
-def reminder_keyboard(rid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[_button("✅ Paid", f"paid:{rid}"), _button("😴 Snooze", f"snz:{rid}")]])
+def reminder_keyboard(rid: str, reason: str = "reminder") -> InlineKeyboardMarkup:
+    """The "added for you" notice and the last message only offer Paid: there's no reminder there to snooze."""
+    paid = _button("✅ Paid", f"paid:{rid}")
+    if reason in ("added", "last"):
+        return InlineKeyboardMarkup([[paid]])
+    return InlineKeyboardMarkup([[paid, _button("😴 Snooze", f"snz:{rid}")]])
 
 
 def snooze_keyboard(rid: str) -> InlineKeyboardMarkup:
@@ -348,20 +371,13 @@ async def _download_photo(msg: Message, settings: Settings) -> str | None:
 async def capture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg, user, settings = update.effective_message, update.effective_user, _settings(context)
 
-    if msg.text and (rid := context.user_data.pop("fixing", None)):
-        await _signal(context, rid, "fix", extract.remember_text(msg.text))
-        await _react(msg)
-        return
-    if msg.text and (rid := context.user_data.pop("snoozing", None)):
-        now = datetime.now(settings.tz)
-        picked = extract.parse_due(msg.text, extract.printed_date(msg.text, now), now)
-        if picked is None or picked[0].date() <= now.date():
-            context.user_data["snoozing"] = rid
-            await msg.reply_text("I didn't get that date. Try something like 12 Oct, or pick a day above.")
-            return
-        until = datetime.combine(picked[0].date(), MORNING, tzinfo=settings.tz)
-        await _signal(context, rid, "snooze", until.isoformat())
-        await _react(msg)
+    reply_to = msg.reply_to_message.message_id if msg.reply_to_message else None
+    if pending := take_pending(context.user_data, reply_to, bool(msg.text)):
+        if pending["kind"] == "fix":
+            await _signal(context, pending["rid"], "fix", extract.remember_text(msg.text))
+            await _react(msg)
+        else:
+            await _snooze_to_typed_date(context, msg, pending["rid"])
         return
 
     if msg.document and msg.document.mime_type == "application/pdf":
@@ -389,6 +405,56 @@ async def capture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         owner, text = target, m["rest"] or None
     await _start_reminder(context, msg, owner_id=owner, added_by=user.id, text=text, photo_name=photo_name)
+
+
+def take_pending(user_data: dict, reply_to: int | None, has_text: bool) -> dict | None:
+    """The Fix or date prompt this message answers. Only a reply to that prompt counts: any other message
+    cancels the prompt and is read as a new bill or note."""
+    pending = user_data.pop("awaiting", None)
+    if pending and has_text and reply_to == pending["prompt_id"]:
+        return pending
+    return None
+
+
+async def _ask(context: ContextTypes.DEFAULT_TYPE, message: Message, kind: str, rid: str, text: str) -> None:
+    """Send a prompt the user answers by replying to it (ForceReply makes their message a reply)."""
+    prompt = await message.reply_text(f"{text}\n/cancel to stop.", reply_markup=ForceReply(selective=True))
+    context.user_data["awaiting"] = {"kind": kind, "rid": rid, "prompt_id": prompt.message_id}
+
+
+async def _snooze_to_typed_date(context: ContextTypes.DEFAULT_TYPE, msg: Message, rid: str) -> None:
+    settings = _settings(context)
+    now = datetime.now(settings.tz)
+    picked = extract.parse_due(msg.text, extract.printed_date(msg.text, now), now)
+    if picked is None or picked[0].date() <= now.date():
+        await _ask(context, msg, "date", rid, "I didn't get that date. Reply with something like 12 Oct.")
+        return
+    until = datetime.combine(picked[0].date(), MORNING, tzinfo=settings.tz)
+    try:
+        status = await _temporal(context).get_workflow_handle(rid).query(ReminderWorkflow.status)
+    except RPCError:
+        await msg.reply_text("I can't find that reminder any more.")
+        return
+    await msg.reply_text(await _snooze(context, rid, until, status))
+
+
+async def _snooze(context: ContextTypes.DEFAULT_TYPE, rid: str, until: datetime, status: Status) -> str:
+    """Snooze only postpones: a time before the next scheduled reminder is refused, not applied."""
+    tz = _settings(context).tz
+    if status.state == "parked":
+        return "This one only lives in /due now. Tap Paid when it's done."
+    if status.state != "scheduled":
+        return "This one isn't waiting on a reminder."
+    if status.next_at and until <= (next_at := datetime.fromisoformat(status.next_at).astimezone(tz)):
+        return f"That's before your next reminder ({day(next_at)}, {clock(next_at)})."
+    await _signal(context, rid, "snooze", until.isoformat())
+    return f"Snoozed until {day(until)}, {clock(until)}"
+
+
+@traced("telegram /cancel")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    had = context.user_data.pop("awaiting", None)
+    await update.effective_message.reply_text("Okay, cancelled." if had else "Nothing to cancel.")
 
 
 FOR_NAME = re.compile(r"^\s*for\s+(?P<name>[\w.-]+)\s*[:,-]?\s*(?P<rest>.*)$", re.I | re.S)
@@ -451,12 +517,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _signal(context, rid, "save")
             await q.answer("Saved")
         case "fix" if status.state in ("confirming", "fixing"):
-            context.user_data["fixing"] = rid
             await q.answer()
-            await q.message.reply_text(
-                "What should I change? For example: amount is 1340, or due 12 Oct.",
-                reply_markup=ForceReply(selective=True),
-            )
+            await _ask(context, q.message, "fix", rid,
+                       "What should I change? Reply to this message, e.g. amount is 1340, or due 12 Oct.")  # fmt: skip
         case "save" | "fix":
             await q.answer("This one is already saved.")
         case "paid":
@@ -471,7 +534,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except TelegramError:
                 pass
         case "snz":
-            context.user_data.pop("snoozing", None)
             await _edit_markup(q, snooze_keyboard(rid))
             await q.answer()
         case "back":
@@ -479,12 +541,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await q.answer()
         case "snz1" | "snz3":
             until = datetime.combine(now.date() + timedelta(days=1 if action == "snz1" else 3), MORNING, tzinfo=settings.tz)
-            await _signal(context, rid, "snooze", until.isoformat())
-            await q.answer(f"Snoozed until {day(until)}, {clock(until)}")
+            await q.answer(await _snooze(context, rid, until, status), show_alert=False)
         case "pick":
-            context.user_data["snoozing"] = rid
             await _edit_markup(q, calendar_keyboard(rid, now.year, now.month, now.date()))
-            await q.answer("Pick a day, or type a date like 12 Oct")
+            await q.answer()
+            await _ask(context, q.message, "date", rid, "Tap a day above, or reply to this message with a date like 12 Oct.")
         case "cal" if re.fullmatch(r"\d{6}", arg):
             await _edit_markup(q, calendar_keyboard(rid, int(arg[:4]), int(arg[4:]), now.date()))
             await q.answer()
@@ -493,10 +554,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if picked <= now.date():
                 await q.answer("Pick a day after today.")
                 return
-            context.user_data.pop("snoozing", None)
+            if (context.user_data.get("awaiting") or {}).get("rid") == rid:
+                context.user_data.pop("awaiting")
             until = datetime.combine(picked, MORNING, tzinfo=settings.tz)
-            await _signal(context, rid, "snooze", until.isoformat())
-            await q.answer(f"Snoozed until {day(until)}, {clock(until)}")
+            await q.answer(await _snooze(context, rid, until, status))
         case _:
             await q.answer()
 
@@ -531,6 +592,7 @@ def build(settings: Settings, temporal: Client, store: Store) -> Application:
     app.add_handler(CommandHandler("start", start, filters=private))
     app.add_handler(CommandHandler("due", due, filters=private))
     app.add_handler(CommandHandler("remind", remind, filters=private))
+    app.add_handler(CommandHandler("cancel", cancel, filters=private))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(
         MessageHandler(private & (filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.Document.ALL), capture)

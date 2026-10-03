@@ -143,3 +143,33 @@ telegram capture                       (transaction, bot)
 - **Token scrubber.** `before_send` scrubs anything shaped like a bot token. Its first regex started with `\b`, and in `…/bot123456:ABC…` there's no word boundary between "bot" and the digits, so a token inside a Telegram URL would have slipped through. Fixed with a digit lookbehind.
 - **Bill text in Temporal history.** A blocked draft said "The date I found is labelled 'Grace period ends 19-11-2026'…". That message lives in the Draft, which is stored in Temporal history: model-quoted bill text. It now names a category instead ("looks like the end of a grace period, not the due date"). The hint to Gemma can still quote, because it goes only to the local model.
 - **Span format.** sentry-sdk 2.70 sends gen_ai spans as streamed span-v2 items linked by trace and parent span IDs, not inside the transaction's `spans` list. The tests read both formats.
+
+## Sun 4 Oct, ~03:00: code review before live testing
+
+A second Claude instance reviewed the repo at `f61a137`. Prateek confirmed the schedule changes (a product decision) before they were built.
+
+**A. The reminder schedule, redesigned.** The old one had problems: a renewal due in three weeks got its first reminder the night before. "In 5 hours" nudged every 5 hours around the clock, including 3 AM. And the demo pace leaked into real use. Now:
+
+| Due | Reminders |
+|---|---|
+| Date | 10 AM three days before (only if saved at least 3 days ahead), 7 PM the evening before, 10 AM + 7 PM on the day, then 10 AM daily while overdue |
+| Time, at least 1 h away | 30 min before, at the deadline, then 10 AM daily |
+| Time, 10 min–1 h away | At the deadline, then 10 AM daily |
+| Time, under 10 min (demo) | Every N minutes, 5 times, then 10 AM daily. N is measured from when the due was read *or fixed* (`Draft.read_at`), not from the original message |
+
+- **Quiet hours, 22:00–08:00, for all but demos.** A reminder that must beat the deadline moves *earlier*, to 21:30; anything else moves to 08:00. (Prateek's call: moving a pre-deadline reminder to 08:00 could land it after the deadline.)
+- **After 30 days overdue:** one last message with only a Paid button, then the due waits in `/due` with no timers.
+- **The confirm message states the whole plan:** "I'll remind you Tue 6 Oct 10 AM, Thu 8 Oct 7 PM, Fri 9 Oct 10 AM and 7 PM, then every morning until it's paid."
+- **After a long sleep,** missed reminders are skipped rather than sent in a burst: the next reminder is computed from `max(scheduled, now)`.
+
+**B. Bugs fixed:**
+- **A pending Fix or date question swallowed unrelated messages.** A brand-new IOU sent hours later could become the correction, or the old reminder's snooze date. Now only a *reply* to the bot's question (ForceReply) counts, any other message cancels the question and is read normally, and there's `/cancel`.
+- **The admin's "added a reminder for you" notice had Snooze**, which could pull the first reminder *earlier*. It now offers only Paid. Separately, the workflow ignores any snooze before the next scheduled reminder, and the bot says "That's before your next reminder (…)".
+- **SQLite activities retried forever** (no maximum attempts), so a deterministic bug would loop invisibly every 5 minutes. They now get 5 attempts, then the failure is logged and in Sentry, and a failed `save_reminder` tells the user. Telegram calls still retry through an offline laptop, but `BadRequest`, like `Forbidden`, is now final. `mark_paid` was split into `mark_paid` (SQLite) and `show_paid` (Telegram) so each gets the right policy. A failing `discard_input` no longer crashes the workflow; the start-up sweep is the backstop.
+- **A long-overdue reminder looped in one history.** It now continues-as-new after 50 reminders (or when Temporal suggests it), carrying the draft, schedule anchors, message ID, count and snooze state, including a snooze that arrived but wasn't applied yet. With the 30-day cap a due sends at most ~35 reminders, so this is insurance.
+
+**C.** Ollama `keep_alive` is now 30 minutes, set on *every* request. Setting it only on the warm-up wouldn't work, because each chat request would reset it to the 5-minute default. The cost is ~6.6 GB of RAM held (5.5 GB of weights plus a 1 GB vision projector); noted in the README.
+
+**Test finding.** After these tests were added, two passed alone but failed in the suite, with `env.sleep()` timing out in real time. The cause: a test ended while an activity was in flight, and terminating a workflow mid-activity left a time-skipping lock held in the test server. The fix: `running()` waits for activities to settle before terminating.
+
+137 unit tests (~6 s), stable across repeated runs. The integration flow now snoozes past the next demo reminder, because an earlier snooze is refused by design.
