@@ -378,11 +378,13 @@ class ReminderWorkflow:
                     continue  # Paid or a new snooze: handled at the top of the loop
                 except asyncio.TimeoutError:
                     pass
+            # Work out the next reminder before sending this one, so the status never shows "sent" with a
+            # stale next_at (a Snooze checked against it would be refused). After a long sleep, skip the
+            # reminders we slept through instead of sending them in a burst.
+            self._next_at = next_reminder(due, has_time, slots, max(self._next_at, workflow.now()))
             self._sent += 1
             sent_this_run += 1
             await self._show_reminder("reminder")
-            # After a long sleep, skip the reminders we slept through instead of sending them in a burst.
-            self._next_at = next_reminder(due, has_time, slots, max(self._next_at, workflow.now()))
             await self._store("set_next", self._saved())
 
         self._state = "paid"

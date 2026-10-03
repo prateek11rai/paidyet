@@ -83,6 +83,7 @@ async def test_text_save_remind_snooze_remind_paid(settings, temporal, worker, t
         assert (row.title, row.amount_inr, row.paid_at) == (d.title, 500.0, None)
 
         status = await until(handle, lambda s: s.reminders_sent == 1, seconds=30)
+        assert datetime.fromisoformat(status.next_at) > datetime.fromisoformat(d.due_at)  # already moved on
         # A snooze only postpones, so push past the next demo reminder (a minute after the first).
         snooze_to = datetime.fromisoformat(status.next_at) + timedelta(seconds=5)
         await handle.signal(ReminderWorkflow.snooze, snooze_to.isoformat())
