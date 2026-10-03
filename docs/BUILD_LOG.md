@@ -54,3 +54,36 @@ Verified:
 - Ctrl-C stops the app, then Ollama and Temporal, and leaves no pid files.
 - An Ollama that's already running is reused, gets no pid file, and survives `stop-deps`.
 - `poe up` runs with no `.env`, logging one line each for the skipped bot and Sentry.
+
+## Sun 4 Oct, ~01:20: extraction with Gemma
+
+**Samples.** `samples/` holds four synthetic bills (electricity, broadband, rent, insurance renewal) rendered from HTML with headless Chrome, and six IOU lines in Hinglish and English. Companies are fictional, and names and numbers are fake. Each bill includes a trap: a bill date, a late-fee amount, a "next invoice" date, a grace-period end, a deposit, a sum insured. `samples/expected.json` holds the answers, assuming today is Sun 4 Oct.
+
+**How a read works.** Gemma fills a JSON schema through Ollama's structured output (`format`), at temperature 0 with thinking off. Plain code then decides:
+- dates in Asia/Kolkata, including relative phrases like "Friday tak", "kal", "3 din mein" and "in 2 minutes", parsed by code rather than the model;
+- no past due dates;
+- the amount must be a positive number up to ₹10 lakh;
+- whether the draft can be saved at all.
+
+**Iterations** (gemma4:e4b, 10 samples, Apple M4 16 GB; time is warm wall-clock, excluding model load):
+
+| Version | Change | Kind | Payee | Amount | Due | Blocked | Silent wrong due | Photo | Text |
+|---|---|---|---|---|---|---|---|---|---|
+| v1 | Baseline prompt | 10 | 8 | 10 | 8 | 0 | 2 | 4.8 s | 3.6 s |
+| v1 + thinking | `think: true` | 9 | 10 | 10 | 8 | 0 | 1 | ~33 s | ~19 s |
+| v2 | Quote the deadline (`due_evidence`), stricter payee rules | 10 | 9 | 10 | 8 | 0 | 2* | 4.3 s | 3.2 s |
+| v3 | Code reviews the answer; one hinted retry; a bill with no date blocks Save | 10 | 9 | 10 | 9 | 1 | 0 | 6.7 s | 3.2 s |
+| v4–v5 | Model also lists every date with its label | 10 | 9 | 10 | 8–9 | 1 | 1 (v5) | 8–11 s | 4.8 s |
+| **final** | v3, plus code parses the date out of the quote | **10** | **9** | **10** | **9** | **1** | **0** | **7.0 s** | **3.2 s** |
+
+\* In v2 Gemma found no date on two bills, and the validator quietly defaulted them to "tomorrow". After that, a bill without a due date blocks Save, and only an IOU without a date defaults to tomorrow (with a note).
+
+What we learned:
+- **The bill-date trap is real, and it's about choosing, not seeing.** v1 took the insurance *grace period end* (19 Nov) as the due date. But asked plainly to "list every date with its label", Gemma reads `Renew by: 20-10-2026` correctly. The mistake happens when it has to choose.
+- **Thinking costs 6–8x and doesn't fix dates.** Off.
+- **Making the model list labelled dates (v4–v5) backfired.** First it copied the dates themselves as labels. Then, once told not to, it turned "Pay by 12 Oct 2026" into 2026-12-12, a *silent* wrong date. Dropped.
+- **What worked: the model quotes, code parses.** Gemma copies the words around the deadline (`"Pay by 12 Oct 2026"`), and code parses the date from that quote, day first. Labels like "grace", "bill date", "next invoice" or "after due date" are rejected. When code sees a known mistake (a bill with no date, or a non-deadline label), it asks Gemma once more with a pointed hint. That fixes the electricity bill. The insurance notice still fails after the hint, but it fails *safely*: Save is blocked with "The date I found is labelled 'Grace period ends', which isn't a due date", and the user taps Fix.
+- **Cold start.** The first call took 29.5 s, of which 22.2 s was Ollama loading the model; Ollama unloads it after 5 idle minutes. Warm photos take ~7 s and text ~3 s, both well under the 20 s threshold, so **gemma4:e4b stays** and e2b isn't needed. The cold start is a UX problem to fix (warm-up on start) and to show in Sentry.
+- At temperature 0, two consecutive runs gave identical fields.
+
+**Privacy.** A photo is written to `.data/tmp/<32 random hex>.<ext>` with mode 0600, resolved only through an allowlist pattern, and deleted afterwards; `sweep()` runs on start. For Fix, Gemma gets the previous *fields* plus the user's correction, never the photo again, so a photo is needed only for the first read.

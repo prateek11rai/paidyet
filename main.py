@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from telegram.error import InvalidToken
 from temporalio.client import Client
 
-from paidyet import bot
+from paidyet import bot, extract
 from paidyet.config import TEMPORAL_ADDRESS, ConfigError, Settings, load_settings
 
 log = logging.getLogger("paidyet")
@@ -46,16 +46,6 @@ def init_sentry(settings: Settings) -> None:
         disabled_integrations=[HttpxIntegration()],
     )
     log.info("Sentry: enabled (no PII, no prompts, no local variables)")
-
-
-def sweep_tmp(tmp_dir: Path) -> None:
-    """Delete photos a crash may have left behind; they only live here while being read."""
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    leftovers = [p for p in tmp_dir.iterdir() if p.is_file()]
-    for p in leftovers:
-        p.unlink()
-    if leftovers:
-        log.info("swept %d leftover file(s) from %s", len(leftovers), tmp_dir.name)
 
 
 async def run(settings: Settings) -> None:
@@ -98,7 +88,8 @@ def main() -> None:
         sys.exit(f"Config error: {e}")
     setup_logging(settings.logs_dir)
     init_sentry(settings)
-    sweep_tmp(settings.tmp_dir)
+    if swept := extract.sweep(settings.tmp_dir):
+        log.info("deleted %d leftover photo(s) from a previous run", swept)
     asyncio.run(run(settings))
 
 

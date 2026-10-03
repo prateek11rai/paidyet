@@ -1,0 +1,16 @@
+{
+  "_note": "Synthetic samples: fictional companies, fake names and numbers. Expected values assume today is 2026-10-04 (Sunday) in Asia/Kolkata.",
+  "now": "2026-10-04T10:00:00+05:30",
+  "cases": [
+    {"file": "electricity.png", "kind": "bill", "payee": "sahyadri", "amount_inr": 1240, "due": "2026-10-09"},
+    {"file": "broadband.png", "kind": "bill", "payee": "skynet", "amount_inr": 1179, "due": "2026-10-12"},
+    {"file": "rent.png", "kind": "bill", "payee": "menon", "amount_inr": 15500, "due": "2026-10-10"},
+    {"file": "insurance.png", "kind": "bill", "payee": "kavach", "amount_inr": 8450, "due": "2026-10-20"},
+    {"text": "Rahul ko 500 dene hai Friday tak", "kind": "iou", "payee": "rahul", "amount_inr": 500, "due": "2026-10-09"},
+    {"text": "bhai 500 Rahul ko bhejna hai Friday tak", "kind": "iou", "payee": "rahul", "amount_inr": 500, "due": "2026-10-09"},
+    {"text": "Forwarded from Priya: Arjun, Goa trip ka tera share 3,450 hua. Saturday tak bhej dena", "kind": "iou", "payee": "priya", "amount_inr": 3450, "due": "2026-10-10"},
+    {"text": "dinner split 860 to Rahul by tomorrow", "kind": "iou", "payee": "rahul", "amount_inr": 860, "due": "2026-10-05"},
+    {"text": "flat ka bijli share 1240 Vikram ko dena hai 9 Oct tak", "kind": "iou", "payee": "vikram", "amount_inr": 1240, "due": "2026-10-09"},
+    {"text": "Neha ko 200 dene hai in 2 minutes", "kind": "iou", "payee": "neha", "amount_inr": 200, "due": "+2m"}
+  ]
+}
