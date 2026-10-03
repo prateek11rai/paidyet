@@ -339,7 +339,17 @@ class ReminderWorkflow:
             previous_message_id=self._message_id,
         )
         name = "edit_reminder" if edit and self._message_id else "send_reminder"
-        message_id = await workflow.execute_activity(name, view, result_type=int, **QUICK)
+        try:
+            message_id = await workflow.execute_activity(name, view, result_type=int, **QUICK)
+        except ActivityError:
+            # Telegram refuses to message someone who never opened the bot (or blocked it). Keep the
+            # reminder alive and tell whoever added it; the next nudge tries again.
+            if reason == "added":
+                await self._notice(
+                    "I couldn't message them on Telegram. Ask them to open the bot and send /start; "
+                    "I'll keep trying at each reminder."
+                )
+            return
         self._message_id = message_id or self._message_id
 
     async def _notice(self, text: str, edit: int | None = None, reply: int | None = None) -> None:

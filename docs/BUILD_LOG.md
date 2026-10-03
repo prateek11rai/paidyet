@@ -112,3 +112,10 @@ What we learned:
 - A formatting test caught `str.capitalize()` lowercasing "Fri 9 Oct" into "fri 9 oct".
 
 106 unit tests in 2.3 s.
+
+## Sun 4 Oct, ~01:50: access and lists
+
+- **Allowlist gate** runs before every handler. An unknown user gets "This is a private bot. Your Telegram ID is N; send it to the owner." and nothing else: no workflow, no model call.
+- **`/due`** shows "Overdue" and "Upcoming" from SQLite. Each line says "added by you" or "added by <admin>" and has a ✅ Paid button. Tapping it signals the workflow and redraws the list without that item. The admin also sees "You added for others".
+- **Admin.** `/remind arjun ₹500 to Rahul by Fri`, or a bill photo captioned "for arjun". The admin confirms the draft in their own chat ("For Arjun · added by you"). On Save, Arjun gets "Prateek added a reminder for you" with Paid/Snooze, and when he taps Paid the admin gets "✅ Arjun paid: …".
+- **A friend who never opened the bot.** Telegram won't let a bot message someone first. The "added" message fails as non-retryable, so the workflow tells the admin to ask the friend to send /start, stays alive, and tries again at each reminder.

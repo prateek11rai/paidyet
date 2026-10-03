@@ -73,7 +73,7 @@ async def run(settings: Settings) -> None:
 
         app = None
         if settings.telegram_bot_token:
-            app = bot.build(settings, client)
+            app = bot.build(settings, client, store)
             try:
                 await stack.enter_async_context(app)
             except InvalidToken as e:

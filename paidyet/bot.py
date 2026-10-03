@@ -24,6 +24,7 @@ from temporalio.service import RPCError
 from paidyet import extract
 from paidyet.config import TASK_QUEUE, Settings
 from paidyet.extract import Draft
+from paidyet.store import Row, Store
 from paidyet.workflows import MORNING, ConfirmView, ReminderInput, ReminderView, ReminderWorkflow
 
 log = logging.getLogger(__name__)
@@ -231,8 +232,69 @@ async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    await update.effective_message.reply_text(f"{USAGE}\n\nYour Telegram ID is {user.id}.")
+    user, settings = update.effective_user, _settings(context)
+    text = f"{USAGE}\n\nYour Telegram ID is {user.id}."
+    if settings.is_admin(user.id):
+        text += (
+            "\n\nAs the admin you can add reminders for friends: /remind arjun ₹500 to Rahul by Fri, "
+            "or send a bill photo captioned \"for arjun\"."
+        )
+    await update.effective_message.reply_text(text)
+
+
+def due_lines(rows: list[Row], viewer: int, settings: Settings, now: datetime) -> tuple[list[str], list[str]]:
+    overdue, upcoming = [], []
+    for r in rows:
+        due = datetime.fromisoformat(r.due_at).astimezone(settings.tz)
+        late = due < now if r.has_time else due.date() < now.date()
+        payee = f" to {r.payee}" if r.payee else ""
+        line = f"• {r.title} · {inr(r.amount_inr)}{payee} · {due_status(due, r.has_time, now)} · {added_by(r.added_by, viewer, settings)}"
+        (overdue if late else upcoming).append(line)
+    return overdue, upcoming
+
+
+def due_message(viewer: int, settings: Settings, store: Store, now: datetime, skip: str | None = None):
+    mine = [r for r in store.open_for(viewer) if r.id != skip]
+    overdue, upcoming = due_lines(mine, viewer, settings, now)
+    parts = []
+    if overdue:
+        parts.append("🔴 Overdue\n" + "\n".join(overdue))
+    if upcoming:
+        parts.append("🗓 Upcoming\n" + "\n".join(upcoming))
+    if settings.is_admin(viewer):
+        others = [r for r in store.open_added_by(viewer) if r.id != skip]
+        if others:
+            lines = [f"• {settings.name_of(r.owner_id)}: {r.title} · {inr(r.amount_inr)} · "
+                     f"{due_status(datetime.fromisoformat(r.due_at).astimezone(settings.tz), r.has_time, now)}"
+                     for r in others]  # fmt: skip
+            parts.append("👀 You added for others\n" + "\n".join(lines))
+    if not parts:
+        return "Nothing due. 🎉", None
+    buttons = [[_button(f"✅ Paid: {r.title}"[:40], f"dpaid:{r.id}")] for r in mine[:8]]
+    return "\n\n".join(parts), InlineKeyboardMarkup(buttons) if buttons else None
+
+
+async def due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = _settings(context)
+    text, markup = due_message(update.effective_user.id, settings, context.bot_data["store"], datetime.now(settings.tz))
+    await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/remind <name> <what>: the admin adds a reminder for a friend."""
+    msg, user, settings = update.effective_message, update.effective_user, _settings(context)
+    if not settings.is_admin(user.id):
+        await msg.reply_text("Only the admin can add reminders for other people. Just send me your own bill or note.")
+        return
+    friends = ", ".join(n for uid, n in settings.allowed_users.items() if uid != user.id) or "nobody yet"
+    if len(context.args) < 2:
+        await msg.reply_text(f"Usage: /remind <name> <what>, e.g. /remind arjun ₹500 to Rahul by Fri\nFriends: {friends}")
+        return
+    target = settings.user_id_for(context.args[0])
+    if target is None or target == user.id:
+        await msg.reply_text(f"I don't know {context.args[0]!r}. Friends: {friends}")
+        return
+    await _start_reminder(context, msg, owner_id=target, added_by=user.id, text=" ".join(context.args[1:]))
 
 
 def new_reminder_id() -> str:
@@ -297,11 +359,31 @@ async def capture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if text and (sender := _forwarded_from(msg)):
         text = f"Forwarded from {sender}: {text}"
 
+    owner = user.id
+    # The admin can caption a bill photo "for arjun" to add it to a friend's list.
+    if photo_name and msg.caption and settings.is_admin(user.id) and (m := FOR_NAME.match(msg.caption)):
+        target = settings.user_id_for(m["name"])
+        if target is None:
+            extract.discard_photo(settings.tmp_dir, photo_name)
+            await msg.reply_text(f"I don't know {m['name']!r}. Check ALLOWED_USERS.")
+            return
+        owner, text = target, m["rest"] or None
+    await _start_reminder(context, msg, owner_id=owner, added_by=user.id, text=text, photo_name=photo_name)
+
+
+FOR_NAME = re.compile(r"^\s*for\s+(?P<name>[\w.-]+)\s*[:,-]?\s*(?P<rest>.*)$", re.I | re.S)
+
+
+async def _start_reminder(
+    context: ContextTypes.DEFAULT_TYPE, msg: Message, *, owner_id: int, added_by: int,
+    text: str | None, photo_name: str | None = None,
+) -> None:  # fmt: skip
+    settings = _settings(context)
     status = await msg.reply_text("👀 Reading it…")
     text_key = extract.remember_text(text) if text else None
     inp = ReminderInput(
-        owner_id=user.id,
-        added_by=user.id,
+        owner_id=owner_id,
+        added_by=added_by,
         origin_chat_id=msg.chat_id,
         origin_message_id=msg.message_id,
         status_message_id=status.message_id,
@@ -358,6 +440,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         case "paid":
             await _signal(context, rid, "paid")
             await q.answer("Marked as paid ✅")
+        case "dpaid":  # from the /due list: refresh the list without it
+            await _signal(context, rid, "paid")
+            await q.answer("Marked as paid ✅")
+            text, markup = due_message(user.id, settings, context.bot_data["store"], now, skip=rid)
+            try:
+                await q.edit_message_text(text, reply_markup=markup)
+            except TelegramError:
+                pass
         case "snz":
             context.user_data.pop("snoozing", None)
             await _edit_markup(q, snooze_keyboard(rid))
@@ -409,13 +499,16 @@ async def _react(msg: Message) -> None:
         pass
 
 
-def build(settings: Settings, temporal: Client) -> Application:
+def build(settings: Settings, temporal: Client, store: Store) -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.bot_data["settings"] = settings
     app.bot_data["temporal"] = temporal
+    app.bot_data["store"] = store
     private = filters.ChatType.PRIVATE
     app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(CommandHandler("start", start, filters=private))
+    app.add_handler(CommandHandler("due", due, filters=private))
+    app.add_handler(CommandHandler("remind", remind, filters=private))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(
         MessageHandler(private & (filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.Document.ALL), capture)

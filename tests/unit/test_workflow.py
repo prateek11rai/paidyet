@@ -44,9 +44,10 @@ async def env():
 class Fakes:
     """Activities with the real names; records every call. `reads` is what read_input does on each attempt."""
 
-    def __init__(self, reads: list, fixes: list | None = None):
+    def __init__(self, reads: list, fixes: list | None = None, telegram_refuses: bool = False):
         self.reads = list(reads)
         self.fixes = list(fixes or [])
+        self.telegram_refuses = telegram_refuses
         self.calls: list[tuple[str, object]] = []
         self.message_ids = iter(range(100, 1000))
 
@@ -81,6 +82,8 @@ class Fakes:
         @activity.defn(name="send_reminder")
         async def send_reminder(view: ReminderView) -> int:
             self.calls.append(("send_reminder", view))
+            if self.telegram_refuses:
+                raise ApplicationError("the user blocked the bot", type="Forbidden", non_retryable=True)
             return next(self.message_ids)
 
         @activity.defn(name="edit_reminder")
@@ -304,3 +307,16 @@ async def test_unconfirmed_draft_expires_after_a_week(env):
         assert await handle.result() == "expired"
     assert fakes.payloads("show_confirm")[-1].state == "expired"
     assert "save_reminder" not in fakes.names()
+
+
+async def test_friend_who_never_opened_the_bot(env):
+    now = await now_ist(env)
+    fakes = Fakes(reads=[draft(now + timedelta(days=5))], telegram_refuses=True)
+    async with running(env, fakes, added_by=ADMIN) as handle:
+        await until(handle, lambda s: s.state == "confirming")
+        await handle.signal(ReminderWorkflow.save)
+        await eventually(lambda: fakes.payloads("notify"))
+        notice = fakes.payloads("notify")[0]
+        assert notice.chat_id == ADMIN and "/start" in notice.text
+        status = await until(handle, lambda s: s.state == "scheduled")
+        assert status.next_at  # still alive: the next reminder will try again
