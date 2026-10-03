@@ -34,7 +34,7 @@ Nothing goes out between 22:00 and 08:00, except demo reminders. A reminder that
 
 ## Built for
 
-The DEV [Hacktoberfest Weekend Challenge: Build for a Friend](https://dev.to/challenges/hacktoberfest-weekend-2026-10-01), part of Hacktoberfest 2026 (MLH × DEV). Submission post: *link coming once it's published*.
+The DEV [Hacktoberfest Weekend Challenge: Build for a Friend](https://dev.to/challenges/hacktoberfest-weekend-2026-10-01), part of Hacktoberfest 2026 (MLH × DEV). Submission post: [PaidYet: for the friend who says “kal bhej dunga”](https://dev.to/prateek11rai/paidyet-for-the-friend-who-says-kal-bhej-dunga-p5l).
 
 Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **Best Use of Sentry Agent Tracing**.
 

@@ -1,6 +1,6 @@
 ---
 title: "PaidYet: for the friend who says “kal bhej dunga”"
-published: false
+published: true
 tags: devchallenge, weekendchallenge, hf26challenge, opensource
 ---
 
@@ -23,7 +23,7 @@ He's on Android, he already lives in Telegram, and he writes in Hinglish. So the
 
 ## Demo
 
-<!-- TODO: replace with the video once it's uploaded, e.g. {% embed https://youtu.be/VIDEO_ID %} -->
+PaidYet is a private bot that runs on my laptop and handles people's bills, so there's no public instance to click. Here's the flow, captured from the live bot. To run your own copy, clone the repo and run `uv run poe up`; the README has the setup.
 
 ![A phone photo of the synthetic electricity bill; the bot reads it back with the whole reminder plan and Save / Fix](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/telegram-confirm.png)
 
