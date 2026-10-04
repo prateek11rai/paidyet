@@ -1,6 +1,6 @@
 [project]
 name = "paidyet"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Telegram bot that reads bills with local Gemma and keeps reminding you until you pay."
 readme = "README.md"
 license = "MIT"
