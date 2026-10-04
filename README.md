@@ -189,4 +189,4 @@ The unit tests run the workflow in Temporal's time-skipping test server, so a we
 
 ## After the deadline
 
-The challenge closed on Mon 5 Oct 2026, 06:59 UTC. Commits after that will be listed here. None yet.
+The challenge closed on Mon 5 Oct 2026, 06:59 UTC. The challenge rules ask for any commits after the deadline to be listed here. There are none.
