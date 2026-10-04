@@ -1,0 +1,123 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tests: ${{ steps.summary.outputs.tests }}
+      failed: ${{ steps.summary.outputs.failed }}
+      skipped: ${{ steps.summary.outputs.skipped }}
+      seconds: ${{ steps.summary.outputs.seconds }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # pyproject sets python-downloads = "never", so uv uses this interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --frozen
+
+      # No services needed: workflows run in Temporal's time-skipping test server.
+      - name: Unit tests
+        run: uv run --frozen poe test --junitxml=reports/unit.xml
+
+      - name: Summarise unit results
+        id: summary
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import xml.etree.ElementTree as ET
+          try:
+              root = ET.parse("reports/unit.xml").getroot()
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              tests, failures, errors = (int(suite.get(k, 0)) for k in ("tests", "failures", "errors"))
+              print(f"tests={tests}")
+              print(f"failed={failures + errors}")
+              print(f"skipped={suite.get('skipped', '0')}")
+              print(f"seconds={float(suite.get('time', 0)):.1f}")
+          except (OSError, ET.ParseError, AttributeError):
+              print("tests=?")
+              print("failed=?")
+              print("skipped=?")
+              print("seconds=?")
+          EOF
+
+  # Integration tests will be added later as a second job. They need the real stack (Ollama with
+  # gemma4, a Temporal dev server) and Telegram credentials from repo secrets. When that job
+  # exists, add it to `needs` below and fill the Integration row from its outputs, so one comment
+  # on the PR carries both results.
+
+  report:
+    name: Test report on the PR
+    needs: [unit]
+    # Runs even when tests fail. Skipped on pushes, and on PRs from forks (their token can't comment).
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update the test report comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          UNIT_TESTS: ${{ needs.unit.outputs.tests }}
+          UNIT_FAILED: ${{ needs.unit.outputs.failed }}
+          UNIT_SKIPPED: ${{ needs.unit.outputs.skipped }}
+          UNIT_SECONDS: ${{ needs.unit.outputs.seconds }}
+        run: |
+          marker='<!-- paidyet-test-report -->'
+          result() {
+            case "$1" in
+              success) echo "✅ passed" ;;
+              failure) echo "❌ failed" ;;
+              cancelled) echo "⏹️ cancelled" ;;
+              *) echo "$1" ;;
+            esac
+          }
+          body="$marker
+          ### Test results
+
+          | Suite | Result | Tests | Failed | Skipped | Time |
+          |---|---|---|---|---|---|
+          | Unit | $(result "$UNIT_RESULT") | ${UNIT_TESTS:-?} | ${UNIT_FAILED:-?} | ${UNIT_SKIPPED:-?} | ${UNIT_SECONDS:-?} s |
+          | Integration | ⏳ not in CI yet | | | | |
+
+          [Run details]($RUN_URL) · commit \`${SHA:0:7}\`"
+
+          # One comment per PR: edit ours if it exists, otherwise create it.
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" > /dev/null
+          fi
