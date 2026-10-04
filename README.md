@@ -87,6 +87,9 @@ Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **
 
 PaidYet starts without a bot token or a Sentry DSN. It logs that it skipped them.
 
+> [!TIP]
+> **Agent tooling (optional).** PaidYet was built in Claude Code with [DevRelay](https://devrelay.com), and DevRelay is wired into this repo only. Install it and log in once per machine, then run `uv run poe devrelay-setup` here. Details are in [docs/DEVRELAY_SETUP.md](docs/DEVRELAY_SETUP.md).
+
 ## Run
 
 ```sh
@@ -104,6 +107,7 @@ This starts Ollama (on 127.0.0.1 only) and the Temporal dev server (UI at <http:
 | `uv run poe start-deps` / `stop-deps` | Start or stop Ollama and Temporal only (stopped by pid file, never by port) |
 | `uv run poe test` | Unit tests, no services needed |
 | `uv run poe test-integration` | Integration tests against a running `poe up` |
+| `uv run poe devrelay-setup` | Optional: wire DevRelay into this repo only ([details](docs/DEVRELAY_SETUP.md)) |
 
 > [!NOTE]
 > Can the laptop sleep? Yes. Telegram holds incoming messages for 24 hours, and Temporal fires any timers it missed when it wakes up. A reminder can be late, but it is never lost.
@@ -143,7 +147,7 @@ Anyone not on the allowlist gets "This is a private bot. Your Telegram ID is N; 
 | `tests/unit/` | Validation, parsing, photo deletion, workflow logic in Temporal's time-skipping server, Sentry privacy |
 | `tests/integration/` | The real stack: Gemma on the samples, full reminder cycles, photo deletion |
 | `samples/` | Synthetic bills and IOU messages (fake names and numbers) with expected answers |
-| `docs/` | `BUILD_LOG.md` (decisions, dead ends, real numbers), the DEV post, images |
+| `docs/` | `BUILD_LOG.md` (decisions, dead ends, real numbers), `DEVRELAY_SETUP.md` (agent tooling), the DEV post, images |
 
 ## Testing
 

@@ -8,7 +8,8 @@ __pycache__/
 # Claude Code local settings
 .claude/settings.local.json
 
-# DevRelay: MLH's text with no license, re-downloaded by DevRelay on every start.
-# Claude Code still loads git-ignored skills.
+# DevRelay: MLH's text with no license, fetched per clone by `poe devrelay-setup` (docs/DEVRELAY_SETUP.md).
+# Claude Code still loads git-ignored skills. .agents/ is where DevRelay's sync drops its rules inside a repo.
 .claude/skills/devrelay-*/
 .claude/devrelay-rules.md
+.agents/

@@ -166,3 +166,39 @@ cmd = "pytest tests/unit"
 [tool.poe.tasks.test-integration]
 help = "Integration tests against a running `uv run poe up`"
 cmd = "pytest tests/integration"
+
+[tool.poe.tasks.devrelay-setup]
+help = "Wire DevRelay into this repo only: local-scope MCP server, skills and rules under .claude/ (see docs/DEVRELAY_SETUP.md)"
+interpreter = "bash"
+verbosity = -1
+shell = '''
+set -euo pipefail
+gateway="$HOME/.devrelay/bin/dev_mlh_mcp_server"
+[ -x "$gateway" ] || { echo "DevRelay isn't installed. Do the one-time setup in docs/DEVRELAY_SETUP.md first." >&2; exit 1; }
+cd "$POE_ROOT"
+skills="$POE_ROOT/.claude/skills"
+mkdir -p "$skills"
+
+# Local scope: only Claude Code sessions started in this repo get the server. The env pins its skill sync here.
+claude mcp remove devrelay-gateway --scope local >/dev/null 2>&1 || true
+claude mcp add devrelay-gateway --scope local --env DEVRELAY_SKILLS_DIR="$skills" -- "$gateway" --stdio
+
+# Without DEVRELAY_SKILLS_DIR the sync writes to ~/.claude, ~/.agents and ~/.gemini. It runs from an empty
+# folder because inside a git repo it also writes .agents/AGENTS.md.
+tmp="$(mktemp -d)"
+(cd "$tmp" && DEVRELAY_SKILLS_DIR="$skills" "$gateway" --sync-skills)
+
+# The agent rules, minus the trailing bullets meant for DevRelay's own repository.
+curl -fsSL https://devrelay.com/v1/skills.json -o "$tmp/skills.json"
+python3 - "$tmp/skills.json" > .claude/devrelay-rules.md <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+rules = manifest["agents_rules"]["content"]
+cut = rules.find("- **Keep stdout clean.**")
+print(f"<!-- DevRelay agent rules from devrelay.com/v1/skills.json (manifest {manifest['version']}). "
+      "The bullets about maintaining DevRelay itself were removed. -->")
+print((rules[:cut] if cut != -1 else rules).rstrip())
+PY
+rm "$tmp/skills.json" && rmdir "$tmp"
+echo "DevRelay is wired into this repo only. Restart Claude Code here and check /mcp."
+'''
