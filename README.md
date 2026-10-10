@@ -8,6 +8,8 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](.python-version)
 [![Release](https://img.shields.io/github/v/release/prateek11rai/paidyet)](https://github.com/prateek11rai/paidyet/releases)
 
+🏆 **Won Best Use of Temporal** in the DEV Hacktoberfest 2026 Weekend Challenge. [See all the winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc).
+
 PaidYet is a Telegram bot that runs on your laptop, for the friend who always says "haan bhai, kal bhej dunga" ("yeah, I'll send it tomorrow") and then forgets. Send it a bill photo or a line like "Rahul ko 500 dene hai Friday tak". [Gemma](https://ai.google.dev/gemma), running locally in [Ollama](https://ollama.com), reads it, and you tap Save. Then a durable [Temporal](https://temporal.io) workflow keeps reminding you until you tap Paid. [Sentry](https://sentry.io) traces every step without seeing a single bill.
 
 <table>
@@ -48,7 +50,9 @@ Nothing goes out between 22:00 and 08:00, except demo reminders. A reminder that
 
 The DEV [Hacktoberfest Weekend Challenge: Build for a Friend](https://dev.to/challenges/hacktoberfest-weekend-2026-10-01), part of Hacktoberfest 2026 (MLH × DEV). Submission post: [PaidYet: for the friend who says “kal bhej dunga”](https://dev.to/prateek11rai/paidyet-for-the-friend-who-says-kal-bhej-dunga-p5l).
 
-Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **Best Use of Sentry Agent Tracing**.
+Prize categories entered: **Best Use of Gemma**, **Best Use of Temporal** and **Best Use of Sentry Agent Tracing**. PaidYet won **Best Use of Temporal** ([winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc)).
+
+<img src="docs/img/badge-best-use-of-temporal.png" alt="Badge: Best Use of Temporal in a #HF26Challenge" width="120">
 
 ## Requirements
 
@@ -185,8 +189,11 @@ The unit tests run the workflow in Temporal's time-skipping test server, so a we
 
 - Code: [MIT](LICENSE).
 - Logo: Lucide's [`badge-indian-rupee`](https://lucide.dev/icons/badge-indian-rupee) (ISC), recoloured. See [docs/img/logo-LICENSE.txt](docs/img/logo-LICENSE.txt).
+- Award badge (also on the post's cover, [docs/img/cover.png](docs/img/cover.png)): DEV's Best Use of Temporal badge, as awarded to this project.
 - Gemma: `gemma4` is used under its own terms. The model ships with the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0), included in the [Ollama model](https://ollama.com/library/gemma4).
 
 ## After the deadline
 
-The challenge closed on Mon 5 Oct 2026, 06:59 UTC. The challenge rules ask for any commits after the deadline to be listed here. There are none.
+The challenge closed on Mon 5 Oct 2026, 06:59 UTC. The challenge rules ask for any commits after the deadline to be listed here:
+
+- **2026-10-10:** noted the Best Use of Temporal win in this README and in the post copy (`docs/devto-post.md`), and added the post's cover (`docs/img/cover.png`) and the award badge (`docs/img/badge-best-use-of-temporal.png`). Docs and images only; no code changed.

@@ -2,9 +2,14 @@
 title: "PaidYet: for the friend who says “kal bhej dunga”"
 published: true
 tags: devchallenge, weekendchallenge, hf26challenge, opensource
+cover_image: https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/cover.png
 ---
 
 *This is a submission for the [Hacktoberfest Weekend Challenge: Build for a Friend](https://dev.to/challenges/hacktoberfest-weekend-2026-10-01)*
+
+> 🏆 **Update:** PaidYet won **Best Use of Temporal**! Thank you, DEV and Temporal, and congratulations to the other winners. [See all the winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc).
+
+<img src="https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/badge/badge_image/503/hf26-badge-temporal.png" alt="Badge: Best Use of Temporal in a #HF26Challenge" width="160">
 
 ## What I Built
 
@@ -39,7 +44,7 @@ All the bills in these screenshots are synthetic: fictional companies, fake numb
 
 ## How I Built It
 
-```
+```plaintext
 Telegram ──▶ bot ──▶ Temporal: ReminderWorkflow, one per due
                        ├─ activity: read ──▶ Gemma 4 in Ollama (127.0.0.1) ──▶ code checks the answer
                        ├─ activity: delete the photo / forget the text
