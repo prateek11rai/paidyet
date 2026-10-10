@@ -9,7 +9,7 @@ cover_image: https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/im
 
 > 🏆 **Update:** PaidYet won **Best Use of Temporal**! Thank you, DEV and Temporal, and congratulations to the other winners. [See all the winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc).
 
-<img src="https://dev-to-uploads.s3.us-east-2.amazonaws.com/uploads/badge/badge_image/503/hf26-badge-temporal.png" alt="Badge: Best Use of Temporal in a #HF26Challenge" width="160">
+![Badge: Best Use of Temporal in a #HF26Challenge](https://raw.githubusercontent.com/prateek11rai/paidyet/main/docs/img/badge-best-use-of-temporal.png)
 
 ## What I Built
 
