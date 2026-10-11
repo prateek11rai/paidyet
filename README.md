@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/img/logo.svg" alt="PaidYet logo" width="120"></p>
+<p align="center"><img src="docs/img/banner.png" alt="PaidYet: for the friend who says kal bhej dunga. Winner, Best Use of Temporal, DEV Hacktoberfest 2026"></p>
 
 # PaidYet
 
@@ -8,7 +8,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](.python-version)
 [![Release](https://img.shields.io/github/v/release/prateek11rai/paidyet)](https://github.com/prateek11rai/paidyet/releases)
 
-🏆 **Won Best Use of Temporal** in the DEV Hacktoberfest 2026 Weekend Challenge. [See all the winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc).
+🏆 **Won Best Use of Temporal** in the DEV Hacktoberfest 2026 Weekend Challenge. [Read the submission post](https://dev.to/prateek11rai/paidyet-for-the-friend-who-says-kal-bhej-dunga-p5l) · [See all the winners](https://dev.to/devteam/congrats-to-the-hacktoberfest-weekend-challenge-build-for-a-friend-winners-pgc).
 
 PaidYet is a Telegram bot that runs on your laptop, for the friend who always says "haan bhai, kal bhej dunga" ("yeah, I'll send it tomorrow") and then forgets. Send it a bill photo or a line like "Rahul ko 500 dene hai Friday tak". [Gemma](https://ai.google.dev/gemma), running locally in [Ollama](https://ollama.com), reads it, and you tap Save. Then a durable [Temporal](https://temporal.io) workflow keeps reminding you until you tap Paid. [Sentry](https://sentry.io) traces every step without seeing a single bill.
 
@@ -189,7 +189,7 @@ The unit tests run the workflow in Temporal's time-skipping test server, so a we
 
 - Code: [MIT](LICENSE).
 - Logo: Lucide's [`badge-indian-rupee`](https://lucide.dev/icons/badge-indian-rupee) (ISC), recoloured. See [docs/img/logo-LICENSE.txt](docs/img/logo-LICENSE.txt).
-- Award badge (also on the post's cover, [docs/img/cover.png](docs/img/cover.png)): DEV's Best Use of Temporal badge, as awarded to this project.
+- Award badge (also on the post's cover, [docs/img/cover.png](docs/img/cover.png), and the README banner, [docs/img/banner.png](docs/img/banner.png), source [docs/design/banner.html](docs/design/banner.html)): DEV's Best Use of Temporal badge, as awarded to this project.
 - Gemma: `gemma4` is used under its own terms. The model ships with the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0), included in the [Ollama model](https://ollama.com/library/gemma4).
 
 ## After the deadline
@@ -197,3 +197,4 @@ The unit tests run the workflow in Temporal's time-skipping test server, so a we
 The challenge closed on Mon 5 Oct 2026, 06:59 UTC. The challenge rules ask for any commits after the deadline to be listed here:
 
 - **2026-10-10:** noted the Best Use of Temporal win in this README and in the post copy (`docs/devto-post.md`), and added the post's cover (`docs/img/cover.png`) and the award badge (`docs/img/badge-best-use-of-temporal.png`). Docs and images only; no code changed.
+- **2026-10-12:** added the README banner with the award badge (`docs/img/banner.png`, source `docs/design/banner.html`) and the submission post link at the top. Docs and images only; no code changed.
